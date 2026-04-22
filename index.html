@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>選股雷達</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700;900&family=JetBrains+Mono:wght@400;700&display=swap');
+:root{--bg:#04070e;--surf:#0a101e;--surf2:#0e1628;--b1:#121e35;--b2:#1a2d4a;--accent:#38bdf8;--adim:rgba(56,189,248,.1);--green:#34d399;--red:#f87171;--gold:#fbbf24;--silver:#94a3b8;--bronze:#cd7f32;--pink:#f472b6;--txt:#e2e8f0;--txt2:#64748b;--txt3:#94a3b8;}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--txt);min-height:100vh;}
+body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellipse 55% 35% at 50% 0%,rgba(56,189,248,.05),transparent 65%),linear-gradient(rgba(56,189,248,.015) 1px,transparent 1px),linear-gradient(90deg,rgba(56,189,248,.015) 1px,transparent 1px);background-size:100%,56px 56px,56px 56px;pointer-events:none;z-index:0;}
+.wrap{max-width:900px;margin:0 auto;padding:16px 16px 80px;position:relative;z-index:1;}
+header{padding:16px 0 14px;border-bottom:1px solid var(--b1);display:flex;justify-content:space-between;align-items:center;}
+.logo h1{font-size:18px;font-weight:900;color:var(--accent);letter-spacing:2px;}
+.logo p{font-size:10px;color:var(--txt2);margin-top:2px;}
+#clock{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--txt2);}
+
+.sched{background:var(--surf);border:1px solid var(--b2);border-radius:12px;padding:14px 16px;margin:14px 0;display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+.sched-info{flex:1;min-width:160px;}
+.sched-label{font-size:10px;color:var(--txt2);letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;}
+.sched-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.fbadge{font-size:11px;padding:3px 9px;border-radius:20px;font-family:'JetBrains Mono',monospace;}
+.fb-ok{background:rgba(52,211,153,.1);color:var(--green);border:1px solid rgba(52,211,153,.4);}
+.fb-wait{background:rgba(251,191,36,.1);color:var(--gold);border:1px solid rgba(251,191,36,.4);}
+.fb-wknd{background:rgba(100,116,139,.1);color:var(--txt2);border:1px solid var(--b2);}
+#last-fetch{font-size:11px;color:var(--txt2);}
+.countdown{font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;color:var(--gold);background:rgba(0,0,0,.3);border:1px solid var(--b2);border-radius:8px;padding:7px 14px;white-space:nowrap;}
+.buf-note{font-size:11px;color:var(--txt3);background:rgba(244,114,182,.05);border:1px solid rgba(244,114,182,.2);border-radius:7px;padding:6px 11px;margin-top:8px;width:100%;}
+.buf-note b{color:var(--pink);}
+
+.btn{padding:9px 16px;border-radius:8px;border:none;cursor:pointer;font-weight:700;font-family:'Noto Sans TC',sans-serif;font-size:13px;display:inline-flex;align-items:center;gap:5px;transition:all .2s;}
+.btn-fetch{background:linear-gradient(135deg,var(--accent),#0369a1);color:#000;}
+.btn-fetch:active{transform:scale(.97);}
+.btn-fetch.busy{opacity:.6;pointer-events:none;}
+.btn-g{background:transparent;border:1px solid var(--b2);color:var(--txt3);}
+.spin{width:12px;height:12px;border:2px solid rgba(0,0,0,.2);border-top-color:#000;border-radius:50%;animation:spin .7s linear infinite;display:inline-block;}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.tabs{display:flex;gap:6px;margin:16px 0 0;overflow-x:auto;padding-bottom:4px;}
+.tab{padding:8px 16px;background:var(--surf);border:1px solid var(--b2);border-radius:8px;cursor:pointer;font-size:13px;font-weight:500;color:var(--txt2);white-space:nowrap;}
+.tab.active{background:var(--adim);border-color:var(--accent);color:var(--accent);}
+
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:14px 0 8px;flex-wrap:wrap;}
+.rlabel{font-size:13px;color:var(--txt2);}
+.rlabel b{color:var(--accent);font-size:15px;font-family:'JetBrains Mono',monospace;}
+
+/* TABLE */
+.tbl-wrap{overflow-x:auto;}
+table.mt{width:100%;border-collapse:separate;border-spacing:0 4px;}
+table.mt th{padding:6px 10px 10px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1.5px;color:var(--txt2);text-align:left;white-space:nowrap;}
+.sr{background:var(--surf);transition:background .15s;}
+.sr:active{background:var(--surf2);}
+.sr td{padding:10px 10px;font-size:13px;vertical-align:middle;}
+.sr td:first-child{border-radius:8px 0 0 8px;}
+.sr td:last-child{border-radius:0 8px 8px 0;}
+.sname{font-weight:700;font-size:13px;}
+.scode{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--txt2);margin-top:1px;}
+.ssec{font-size:10px;color:var(--txt2);}
+.pv{font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:700;}
+.up{color:var(--red);}.dn{color:var(--green);}.fl{color:var(--gold);}
+.stars{display:flex;gap:1px;}
+.star{font-size:14px;}
+.s0{color:var(--b2);}.s1{color:var(--bronze);}.s2{color:var(--silver);}.s3{color:var(--gold);}
+.bdgs{display:flex;gap:3px;flex-wrap:wrap;}
+.badge{font-size:10px;padding:2px 6px;border-radius:4px;white-space:nowrap;}
+.bw{background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.3);color:#fbbf24;}
+.br{background:rgba(56,189,248,.1);border:1px solid rgba(56,189,248,.3);color:#38bdf8;}
+.bb{background:rgba(52,211,153,.1);border:1px solid rgba(52,211,153,.3);color:#34d399;}
+.wbtn{font-size:22px;cursor:pointer;}
+.wbtn.on{color:var(--red);}.wbtn.off{color:var(--b2);}
+.ws{display:inline-flex;align-items:center;gap:3px;font-size:10px;padding:2px 7px;border-radius:8px;margin-top:3px;}
+.ws-on{background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.3);color:var(--gold);}
+.ws-off{background:rgba(100,116,139,.06);border:1px solid var(--b2);color:var(--txt2);}
+.ws-buf{background:rgba(244,114,182,.1);border:1px solid rgba(244,114,182,.3);color:var(--pink);}
+
+.div{height:1px;background:var(--b1);margin:24px 0;}
+.wl-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}
+.wl-title{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:700;}
+.wlcnt{background:var(--accent);color:#000;font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;}
+#wlgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px;}
+
+/* CARD */
+.wcard{background:var(--surf);border:1px solid var(--b2);border-radius:12px;overflow:hidden;}
+.wcard.g3{border-color:var(--gold);}
+.wcard.gbuy{border-color:var(--pink);animation:bp 1.8s ease-in-out 3;}
+@keyframes bp{0%,100%{box-shadow:0 0 12px rgba(244,114,182,.3)}50%{box-shadow:0 0 30px rgba(244,114,182,.7)}}
+.buy-banner{display:flex;align-items:center;gap:7px;padding:7px 12px;background:rgba(244,114,182,.12);border-bottom:1px solid rgba(244,114,182,.3);font-size:12px;color:var(--pink);font-weight:600;}
+.buy-ic{animation:bou .5s ease-in-out infinite alternate;}
+@keyframes bou{from{transform:translateY(0)}to{transform:translateY(-2px)}}
+.buy-dis{margin-left:auto;cursor:pointer;opacity:.5;font-size:16px;}
+.wcard-head{padding:12px 14px 10px;}
+.wcard-top{display:flex;justify-content:space-between;margin-bottom:5px;}
+.wcard-n{font-weight:700;font-size:13px;}
+.wcard-c{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--txt2);margin-top:1px;}
+.wremove{font-size:15px;cursor:pointer;color:var(--b2);}
+.wpr{display:flex;align-items:baseline;gap:8px;margin:6px 0 5px;}
+.wprice{font-family:'JetBrains Mono',monospace;font-size:19px;font-weight:700;}
+.wchg{font-size:12px;}
+.wmeta{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:5px;font-size:10px;}
+.wind-cyc{color:var(--pink);}
+
+/* SNAPSHOT TABLE */
+.snaps-wrap{border-top:1px solid var(--b1);}
+.snaps-hd{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;cursor:pointer;}
+.snaps-label{font-size:10px;font-weight:700;letter-spacing:2px;color:var(--txt2);text-transform:uppercase;}
+.snaps-toggle{font-size:11px;color:var(--txt2);}
+.snaps-body{display:none;padding:0 10px 10px;overflow-x:auto;}
+.snaps-body.open{display:block;}
+table.st{width:100%;border-collapse:collapse;min-width:400px;}
+table.st th{font-size:10px;font-weight:700;color:var(--txt2);letter-spacing:1px;text-transform:uppercase;padding:4px 7px;border-bottom:1px solid var(--b2);text-align:left;}
+table.st td{padding:5px 7px;font-size:11px;vertical-align:middle;border-bottom:1px solid rgba(255,255,255,.04);}
+table.st tr:last-child td{border-bottom:none;}
+.evdot{width:8px;height:8px;border-radius:50%;display:inline-block;vertical-align:middle;margin-right:5px;}
+.d1{background:var(--bronze);}.dw{background:var(--pink);}.d3{background:var(--gold);}.dl{background:var(--b2);}
+.ev-entry{color:var(--bronze);}.ev-wr{color:var(--pink);}.ev-wl{color:var(--txt2);font-style:italic;}
+.dtc{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--txt2);white-space:nowrap;}
+.chgt{font-size:10px;font-family:'JetBrains Mono',monospace;padding:1px 4px;border-radius:3px;}
+.cup{background:rgba(248,113,113,.1);color:var(--red);}.cdn{background:rgba(52,211,153,.1);color:var(--green);}
+.cn{background:rgba(255,255,255,.04);color:var(--txt2);}
+.pbig{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;}
+
+.empty{text-align:center;padding:40px 16px;color:var(--txt2);font-size:13px;}
+.empty-ic{font-size:32px;margin-bottom:8px;opacity:.4;}
+
+/* MODAL */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.82);display:flex;align-items:center;justify-content:center;z-index:9990;padding:16px;opacity:0;pointer-events:none;transition:opacity .3s;}
+.overlay.show{opacity:1;pointer-events:all;}
+.modal{background:var(--surf2);border-radius:14px;padding:24px 20px;max-width:440px;width:100%;transform:scale(.93);transition:transform .3s;text-align:center;}
+.overlay.show .modal{transform:scale(1);}
+.modal.m3{border:1px solid var(--gold);}
+.modal.mb{border:1px solid var(--pink);}
+.m-ic{font-size:44px;margin-bottom:8px;animation:fi 2.5s ease-in-out infinite;}
+@keyframes fi{0%,100%{transform:translateY(0) rotate(-3deg)}50%{transform:translateY(-6px) rotate(3deg)}}
+.m-title{font-size:18px;font-weight:900;letter-spacing:2px;margin-bottom:4px;}
+.m3 .m-title{color:var(--gold);}.mb .m-title{color:var(--pink);}
+.m-sub{font-size:12px;color:var(--txt3);margin-bottom:12px;line-height:1.8;}
+.m-upgrade{display:flex;align-items:center;justify-content:center;gap:12px;background:rgba(244,114,182,.08);border:1px solid rgba(244,114,182,.25);border-radius:10px;padding:10px 16px;margin-bottom:12px;}
+.m-sf{font-size:20px;opacity:.5;}.m-arr{font-size:16px;color:var(--pink);}.m-st{font-size:26px;}
+.m-price{font-family:'JetBrains Mono',monospace;font-size:26px;font-weight:700;color:var(--pink);}
+.m-plabel{font-size:11px;color:var(--txt2);margin-top:2px;margin-bottom:12px;}
+.m-tbl{text-align:left;background:rgba(0,0,0,.3);border-radius:8px;padding:8px 10px;margin-bottom:14px;max-height:180px;overflow-y:auto;}
+.mclose{border:none;padding:9px 28px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:'Noto Sans TC',sans-serif;}
+.m3 .mclose{background:linear-gradient(135deg,#f59e0b,#d97706);color:#000;}
+.mb .mclose{background:linear-gradient(135deg,var(--pink),#e11d48);color:#fff;}
+
+.toast{position:fixed;bottom:20px;right:16px;left:16px;max-width:360px;margin:0 auto;background:var(--surf2);border-radius:10px;padding:11px 16px;font-size:13px;z-index:9999;transform:translateY(20px);opacity:0;pointer-events:none;transition:all .3s;border:1px solid var(--b2);}
+.toast.show{transform:translateY(0);opacity:1;}
+.toast.ok{border-color:var(--green);color:var(--green);}
+.toast.info{border-color:var(--accent);color:var(--accent);}
+.toast.warn{border-color:var(--gold);color:var(--gold);}
+.toast.buy{border-color:var(--pink);color:var(--pink);}
+.export-area{display:none;background:rgba(0,0,0,.3);border:1px solid var(--b2);border-radius:8px;padding:12px;margin-top:12px;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--txt3);white-space:pre;overflow-x:auto;line-height:1.7;}
+::-webkit-scrollbar{width:4px;height:4px;}::-webkit-scrollbar-track{background:var(--bg);}::-webkit-scrollbar-thumb{background:var(--b2);border-radius:2px;}
+</style>
+</head>
+<body>
+
+<div class="overlay" id="overlay">
+  <div class="modal" id="modal">
+    <div class="m-ic" id="m-ic">🌟</div>
+    <div class="m-title" id="m-title">—</div>
+    <div class="m-sub" id="m-sub">—</div>
+    <div id="m-extra"></div>
+    <div class="m-tbl" id="m-tbl"></div>
+    <button class="mclose" onclick="closeModal()">知道了</button>
+  </div>
+</div>
+
+<div class="wrap">
+<header>
+  <div class="logo">
+    <h1>📡 選股雷達</h1>
+    <p>Yahoo Finance · 每日 19:00 快照</p>
+  </div>
+  <div id="clock"></div>
+</header>
+
+<div class="sched">
+  <div class="sched-info">
+    <div class="sched-label">每日排程</div>
+    <div class="sched-row">
+      <span class="fbadge fb-wait" id="fbadge">等待更新</span>
+      <span id="last-fetch">尚未抓取</span>
+    </div>
+    <div class="buf-note">🛡️ <b>兩日緩衝</b>：風口消失後需連續 <b>2天</b> 才正式記錄</div>
+  </div>
+  <div class="countdown" id="countdown">--:--:--</div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <button class="btn btn-fetch" id="btn-fetch" onclick="manualFetch()">
+      <span id="fic">⬇</span> 抓取行情
+    </button>
+    <button class="btn btn-g" onclick="doExport()">匯出</button>
+    <button class="btn btn-g" onclick="clearAll()">清除</button>
+  </div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-s="wind" onclick="switchTab('wind')">🌪️ 風口</div>
+  <div class="tab" data-s="rd" onclick="switchTab('rd')">🔬 研發</div>
+  <div class="tab" data-s="buyup" onclick="switchTab('buyup')">📈 買超</div>
+  <div class="tab" data-s="all" onclick="switchTab('all')">⭐ 全部</div>
+</div>
+
+<div class="topbar">
+  <div class="rlabel">篩選結果 <b id="rc">0</b> 檔</div>
+  <div style="display:flex;gap:6px">
+    <button class="btn btn-g" style="font-size:12px;padding:7px 12px" onclick="addAllVisible()">＋ 全部加入</button>
+  </div>
+</div>
+
+<div class="tbl-wrap">
+<table class="mt">
+  <thead><tr>
+    <th>股票</th><th>現價</th><th>漲跌</th><th>成交量</th><th>星級</th><th>策略</th><th>追蹤</th>
+  </tr></thead>
+  <tbody id="tbody"></tbody>
+</table>
+</div>
+
+<div class="div"></div>
+<div class="wl-hd">
+  <div class="wl-title">📌 追蹤名單 <span class="wlcnt" id="wlcnt">0</span></div>
+</div>
+<div id="wlgrid"><div class="empty"><div class="empty-ic">🔭</div>尚無追蹤股票</div></div>
+<div class="export-area" id="export-area"></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const WIND_BUFFER = 2;
+const WATCH_CODES = [
+  {code:'2330',name:'台積電',sector:'半導體'},
+  {code:'2317',name:'鴻海',sector:'電子零組件'},
+  {code:'2454',name:'聯發科',sector:'半導體'},
+  {code:'3661',name:'世芯-KY',sector:'半導體'},
+  {code:'2382',name:'廣達',sector:'電腦及週邊'},
+  {code:'6669',name:'緯穎',sector:'電腦及週邊'},
+  {code:'3035',name:'智原',sector:'半導體'},
+  {code:'2308',name:'台達電',sector:'電子零組件'},
+  {code:'4958',name:'臻鼎-KY',sector:'電子零組件'},
+  {code:'2303',name:'聯電',sector:'半導體'},
+];
+
+const isWind  = s => s.price>0 && s.change>0 && s.volume>1000;
+const isRD    = s => s.price>100 && s.change>-3;
+const isBuyup = s => s.price>0 && s.volume>5000 && s.change>0;
+const metNow  = s => { const m=[]; if(isWind(s))m.push('wind'); if(isRD(s))m.push('rd'); if(isBuyup(s))m.push('buyup'); return m; };
+
+let liveData={}, wl={}, lastFetch=null;
+const pad=n=>String(n).padStart(2,'0');
+const nowISO=()=>new Date().toISOString();
+const fmtP=p=>typeof p==='number'?p.toLocaleString():'—';
+const todayStr=()=>{const d=new Date();return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());};
+function fmtDT(iso){if(!iso)return '—';const d=new Date(iso);return d.getFullYear()+'/'+pad(d.getMonth()+1)+'/'+pad(d.getDate())+' '+pad(d.getHours())+':'+pad(d.getMinutes());}
+function pDiff(a,b){if(!a||!b)return null;return((b-a)/a*100).toFixed(2);}
+function chgTag(v){if(v===null)return '<span class="chgt cn">—</span>';const n=parseFloat(v);return `<span class="chgt ${n>0?'cup':n<0?'cdn':'cn'}">${n>0?'+':''}${v}%</span>`;}
+const BM={wind:['bw','🌪️'],rd:['br','🔬'],buyup:['bb','📈']};
+const cc=c=>c>0?'up':c<0?'dn':'fl';
+const sg=c=>c>0?'▲':c<0?'▼':'●';
+const ps=c=>c>0?'+':'';
+const SL=['','⭐','⭐⭐','⭐⭐⭐'];
+function starsHTML(n){return '<div class="stars">'+[1,2,3].map(i=>`<span class="star ${i<=n?'s'+i:'s0'}">★</span>`).join('')+'</div>';}
+function badgesHTML(met){return '<div class="bdgs">'+met.map(m=>`<span class="badge ${BM[m][0]}">${BM[m][1]}</span>`).join('')+'</div>';}
+function dotCls(t){return{entry:'d1',daily:'d1','wind-retrigger':'dw','wind-lost':'dl'}[t]||'dl';}
+function evCls(t){return{entry:'ev-entry','wind-retrigger':'ev-wr','wind-lost':'ev-wl'}[t]||'';}
+
+function addToWatch(code){
+  if(wl[code])return;
+  const s=liveData[code]||WATCH_CODES.find(x=>x.code===code)||{code,name:code,price:0,change:0,volume:0};
+  wl[code]={stars:1,windActive:isWind(s),windMissCount:0,windCycles:0,hasBuySignal:false,
+    snapshots:[{type:'entry',label:'⭐ 入選追蹤（1星）',date:todayStr(),iso:nowISO(),price:s.price,stars:1,windCycle:0,met:metNow(s)}]};
+  save();render();showToast(`✅ ${s.name} 加入追蹤（1★ @ ${fmtP(s.price)}）`,'ok');
+}
+function removeFromWatch(code){delete wl[code];save();render();showToast('已移除','info');}
+function clearAll(){wl={};lastFetch=null;save();render();showToast('已清除全部','info');}
+function dismissBuy(code){if(wl[code]){wl[code].hasBuySignal=false;save();render();}}
+
+function processDailySnapshot(){
+  const today=todayStr();const alerts=[];
+  Object.keys(wl).forEach(code=>{
+    const w=wl[code];const s=liveData[code];if(!s)return;
+    const alreadyToday=w.snapshots.some(sn=>sn.date===today&&sn.type!=='wind-lost');
+    if(alreadyToday)return;
+    const met=metNow(s);const windNow=isWind(s);const iso=nowISO();
+    if(w.windActive&&!windNow){
+      w.windMissCount=(w.windMissCount||0)+1;
+      if(w.windMissCount>=WIND_BUFFER){
+        w.windActive=false;w.windMissCount=0;
+        w.snapshots.push({type:'wind-lost',label:`🌪️ 風口消失（連續${WIND_BUFFER}日）`,date:today,iso,price:null,stars:w.stars,windCycle:w.windCycles,met:[]});
+      } else {
+        w.snapshots.push({type:'daily',label:`📅 快照（緩衝${w.windMissCount}/${WIND_BUFFER}）`,date:today,iso,price:s.price,stars:w.stars,windCycle:w.windCycles,met});
+        return;
+      }
+    }
+    if(!w.windActive&&windNow){
+      const everLost=w.snapshots.some(sn=>sn.type==='wind-lost');
+      if(everLost){
+        const old=w.stars;const nw=Math.min(w.stars+1,3);
+        w.stars=nw;w.windActive=true;w.windMissCount=0;w.windCycles+=1;w.hasBuySignal=true;
+        w.snapshots.push({type:'wind-retrigger',label:`🔄 風口重觸發→升至${SL[nw]}`,date:today,iso,price:s.price,stars:nw,windCycle:w.windCycles,met});
+        alerts.push({code,old,nw,price:s.price,name:s.name});
+        if(nw>=3)setTimeout(()=>showModal3Star(code),1800);
+        return;
+      } else {w.windActive=true;w.windMissCount=0;}
+    }
+    w.snapshots.push({type:'daily',label:'📅 每日快照',date:today,iso,price:s.price,stars:w.stars,windCycle:w.windCycles,met});
+  });
+  alerts.forEach((a,i)=>{
+    setTimeout(()=>showModalBuy(a.code,a.old,a.nw),i*600+300);
+    showToast(`🚨 ${a.name} 升至${SL[a.nw]} @ ${fmtP(a.price)}`,'buy');
+  });
+  lastFetch=nowISO();save();render();updateSchedUI();
+}
+
+const isWeekend=()=>{const d=new Date().getDay();return d===0||d===6;};
+
+async function manualFetch(){
+  if(isWeekend()){showToast('週末休市','warn');return;}
+  const btn=document.getElementById('btn-fetch');
+  const ic=document.getElementById('fic');
+  btn.classList.add('busy');ic.innerHTML='<span class="spin"></span>';
+  showToast('正在抓取 Yahoo Finance 數據...','info');
+  const codes=WATCH_CODES.map(c=>c.code).join(',');
+  try{
+    const res=await fetch(`/quote?codes=${codes}`,{signal:AbortSignal.timeout(30000)});
+    const json=await res.json();
+    const data=json.data||{};
+    let ok=0,fail=0;
+    WATCH_CODES.forEach(item=>{
+      const d=data[item.code];
+      if(d&&d.price>0&&!d.error){
+        liveData[item.code]={...item,...d,met:metNow(d)};ok++;
+      } else {
+        liveData[item.code]={...item,price:0,change:0,volume:0,met:[]};fail++;
+      }
+    });
+    showToast(`✅ 更新完成：${ok}檔${fail>0?' / '+fail+'失敗':''}`,fail>0?'warn':'ok');
+    processDailySnapshot();
+  } catch(e){
+    showToast('❌ 抓取失敗，請稍後再試','warn');
+  }
+  btn.classList.remove('busy');ic.textContent='⬇';
+  render();
+}
+
+function msUntil19(){const now=new Date(),next=new Date(now);next.setHours(19,0,0,0);if(next<=now)next.setDate(next.getDate()+1);return next-now;}
+function scheduleNext(){setTimeout(()=>{if(!isWeekend())manualFetch();scheduleNext();},msUntil19());}
+function updateSchedUI(){
+  document.getElementById('last-fetch').textContent=lastFetch?fmtDT(lastFetch):'尚未抓取';
+  const done=lastFetch&&new Date(lastFetch).toDateString()===new Date().toDateString();
+  const b=document.getElementById('fbadge');
+  if(isWeekend()){b.className='fbadge fb-wknd';b.textContent='週末休市';}
+  else if(done){b.className='fbadge fb-ok';b.textContent='今日已完成';}
+  else{b.className='fbadge fb-wait';b.textContent='等待更新';}
+}
+function tickCountdown(){const ms=msUntil19();document.getElementById('countdown').textContent=pad(Math.floor(ms/3600000))+':'+pad(Math.floor((ms%3600000)/60000))+':'+pad(Math.floor((ms%60000)/1000));}
+
+function save(){try{localStorage.setItem('radar_v9',JSON.stringify({wl,lastFetch}));}catch(e){}}
+function load(){try{const r=localStorage.getItem('radar_v9');if(r){const d=JSON.parse(r);wl=d.wl||{};lastFetch=d.lastFetch||null;}}catch(e){}}
+
+let curTab='wind',filterStrat=null,sortCol=null,sortDir=-1;
+const expandState={};
+function visibleList(){
+  const all=WATCH_CODES.map(c=>liveData[c.code]||{...c,price:0,change:0,volume:0,met:[]});
+  let list=curTab==='wind'?all.filter(s=>isWind(s)):curTab==='rd'?all.filter(s=>isRD(s)):curTab==='buyup'?all.filter(s=>isBuyup(s)):all;
+  if(filterStrat)list=list.filter(s=>(s.met||[]).includes(filterStrat));
+  list.sort((a,b)=>(wl[b.code]?.stars||0)-(wl[a.code]?.stars||0));
+  return list;
+}
+function switchTab(t){curTab=t;filterStrat=null;document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('active',el.dataset.s===t));render();}
+function addAllVisible(){visibleList().forEach(s=>{if(!wl[s.code])addToWatch(s.code);});render();}
+function toggleExpand(code){expandState[code]=!expandState[code];render();}
+
+function snapTable(code){
+  const w=wl[code];if(!w)return '';
+  const s=liveData[code]||{};const curP=s.price||0;const open=!!expandState[code];
+  let prevP=null;
+  const rows=w.snapshots.map(sn=>{
+    const isLost=sn.type==='wind-lost';
+    const dP=(!isLost&&prevP)?pDiff(prevP,sn.price):null;
+    const dN=(!isLost&&sn.price)?pDiff(sn.price,curP):null;
+    const row=`<tr>
+      <td><span class="evdot ${dotCls(sn.type)}"></span><span class="${evCls(sn.type)}">${sn.label}</span></td>
+      <td class="dtc">${fmtDT(sn.iso)}</td>
+      <td>${isLost?'—':`<span class="pbig">${fmtP(sn.price)}</span>`}</td>
+      <td>${isLost?'—':chgTag(dP)}</td>
+      <td>${isLost?'—':`${fmtP(curP)} ${chgTag(dN)}`}</td>
+    </tr>`;
+    if(!isLost)prevP=sn.price;return row;
+  }).join('');
+  return `<div class="snaps-wrap">
+    <div class="snaps-hd" onclick="toggleExpand('${code}')">
+      <span class="snaps-label">快照記錄（${w.snapshots.length}筆）</span>
+      <span class="snaps-toggle">${open?'▲':'▼'}</span>
+    </div>
+    <div class="snaps-body ${open?'open':''}">
+      <table class="st"><thead><tr><th>事件</th><th>日期</th><th>股價</th><th>較前一筆</th><th>現價/漲跌</th></tr></thead>
+      <tbody>${rows}</tbody></table>
+    </div>
+  </div>`;
+}
+
+function render(){
+  const list=visibleList();
+  document.getElementById('rc').textContent=list.length;
+  const tbody=document.getElementById('tbody');
+  if(!list.length){
+    tbody.innerHTML=`<tr><td colspan="7"><div class="empty"><div class="empty-ic">📥</div>點「抓取行情」載入真實數據</div></td></tr>`;
+  } else {
+    tbody.innerHTML=list.map((s,i)=>{
+      const inW=!!wl[s.code];const cs=inW?wl[s.code].stars:0;const windNow=isWind(s);const w=wl[s.code];const buf=w?.windMissCount||0;
+      let wsHtml='';
+      if(inW){if(windNow)wsHtml=`<div class="ws ws-on">🌪️</div>`;else if(buf>0)wsHtml=`<div class="ws ws-buf">⏳${buf}/${WIND_BUFFER}</div>`;else wsHtml=`<div class="ws ws-off">⚫</div>`;}
+      const hp=s.price>0;
+      return `<tr class="sr">
+        <td><div class="sname">${s.name}</div><div class="scode">${s.code}</div><div class="ssec">${s.sector}</div>${wsHtml}</td>
+        <td><div class="pv ${cc(s.change)}">${hp?fmtP(s.price):'—'}</div></td>
+        <td><div class="pv ${cc(s.change)}" style="font-size:13px">${hp?ps(s.change)+s.change.toFixed(2)+'%'+sg(s.change):'—'}</div></td>
+        <td><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--txt2)">${hp?s.volume.toLocaleString()+'張':'—'}</span></td>
+        <td>${inW?starsHTML(cs):'—'}</td>
+        <td>${badgesHTML(s.met||[])}</td>
+        <td><span class="wbtn ${inW?'on':'off'}" onclick="${inW?`removeFromWatch('${s.code}')`:`addToWatch('${s.code}')`}">${inW?'♥':'♡'}</span></td>
+      </tr>`;
+    }).join('');
+  }
+  const keys=Object.keys(wl);
+  document.getElementById('wlcnt').textContent=keys.length;
+  const grid=document.getElementById('wlgrid');
+  if(!keys.length){grid.innerHTML=`<div class="empty"><div class="empty-ic">🔭</div>尚無追蹤股票</div>`;return;}
+  grid.innerHTML=keys.map(code=>{
+    const s=liveData[code]||WATCH_CODES.find(x=>x.code===code)||{name:code,price:0,change:0};
+    const w=wl[code];const curCC=cc(s.change||0);const windNow=isWind(s);const buf=w.windMissCount||0;
+    const lastSnap=w.snapshots.filter(sn=>sn.type!=='wind-lost').slice(-1)[0];
+    const bb=w.hasBuySignal?`<div class="buy-banner"><span class="buy-ic">🚨</span><span>風口重觸發（第${w.windCycles}次）</span><span class="buy-dis" onclick="dismissBuy('${code}')">✕</span></div>`:'';
+    const ws=windNow?`<div class="ws ws-on">🌪️ 進行中</div>`:buf>0?`<div class="ws ws-buf">⏳緩衝${buf}/${WIND_BUFFER}</div>`:`<div class="ws ws-off">⚫ 停歇</div>`;
+    return `<div class="wcard ${w.stars>=3?'g3':''} ${w.hasBuySignal?'gbuy':''}">
+      ${bb}
+      <div class="wcard-head">
+        <div class="wcard-top">
+          <div><div class="wcard-n">${s.name||code}</div><div class="wcard-c">${code}</div></div>
+          <span class="wremove" onclick="removeFromWatch('${code}')">✕</span>
+        </div>
+        <div class="wpr"><div class="wprice ${curCC}">${s.price?fmtP(s.price):'—'}</div><div class="wchg ${curCC}">${s.price?ps(s.change)+s.change.toFixed(2)+'%':''}</div></div>
+        ${starsHTML(w.stars)}
+        <div class="wmeta">${ws}${w.windCycles>0?`<span class="wind-cyc">🔄${w.windCycles}次</span>`:''}${lastSnap?`<span style="color:var(--txt2)">${lastSnap.date}</span>`:''}</div>
+      </div>
+      ${snapTable(code)}
+    </div>`;
+  }).join('');
+}
+
+function buildSnapTbl(snaps,curP){
+  return `<table class="st" style="width:100%"><thead><tr><th>事件</th><th>日期</th><th>股價</th><th>現價/漲跌</th></tr></thead>
+  <tbody>${snaps.filter(sn=>sn.type!=='wind-lost').map(sn=>{const d=pDiff(sn.price,curP);return `<tr><td><span class="evdot ${dotCls(sn.type)}" style="display:inline-block"></span><span class="${evCls(sn.type)}">${sn.label}</span></td><td class="dtc">${fmtDT(sn.iso)}</td><td><span class="pbig">${fmtP(sn.price)}</span></td><td>${chgTag(d)}</td></tr>`;}).join('')}</tbody></table>`;
+}
+function showModalBuy(code,old,nw){
+  const s=liveData[code]||{};const w=wl[code];if(!w)return;
+  document.getElementById('modal').className='modal mb';
+  document.getElementById('m-ic').textContent='🚨';
+  document.getElementById('m-title').textContent='買入訊號！風口重觸發';
+  document.getElementById('m-sub').textContent=`${s.name||code}（${code}）`;
+  document.getElementById('m-extra').innerHTML=`<div class="m-upgrade"><div class="m-sf">${SL[old]}</div><div class="m-arr">→</div><div class="m-st">${SL[nw]}</div></div><div class="m-price">${fmtP(s.price)}</div><div class="m-plabel">第 ${w.windCycles} 次重觸發</div>`;
+  document.getElementById('m-tbl').innerHTML=buildSnapTbl(w.snapshots,s.price||0);
+  document.getElementById('overlay').classList.add('show');
+}
+function showModal3Star(code){
+  const s=liveData[code]||{};const w=wl[code];if(!w)return;
+  document.getElementById('modal').className='modal m3';
+  document.getElementById('m-ic').textContent='🌟';
+  document.getElementById('m-title').textContent='三星達標通知';
+  document.getElementById('m-sub').textContent='追蹤星級升至三星！';
+  document.getElementById('m-extra').innerHTML='';
+  document.getElementById('m-tbl').innerHTML=buildSnapTbl(w.snapshots,s.price||0);
+  document.getElementById('overlay').classList.add('show');
+}
+function closeModal(){document.getElementById('overlay').classList.remove('show');}
+document.getElementById('overlay').addEventListener('click',e=>{if(e.target===e.currentTarget)closeModal();});
+
+function doExport(){
+  const keys=Object.keys(wl);if(!keys.length){showToast('追蹤名單為空','info');return;}
+  let csv='名稱,代碼,事件,日期,股價,星級,風口次數,策略\n';
+  keys.forEach(code=>{const s=liveData[code]||WATCH_CODES.find(x=>x.code===code)||{name:code};(wl[code].snapshots||[]).forEach(sn=>{csv+=`${s.name||code},${code},"${sn.label}",${sn.date},${sn.price??''},${sn.stars},${sn.windCycle||0},"${(sn.met||[]).join('/')}"\n`;});});
+  const area=document.getElementById('export-area');area.style.display=area.style.display==='block'?'none':'block';area.textContent=csv;
+  try{navigator.clipboard.writeText(csv);showToast('✅ CSV 已複製','ok');}catch(e){}
+}
+
+let _tt;
+function showToast(msg,type='info'){const el=document.getElementById('toast');el.textContent=msg;el.className=`toast show ${type}`;clearTimeout(_tt);_tt=setTimeout(()=>el.classList.remove('show'),3500);}
+
+function tick(){const d=new Date();document.getElementById('clock').textContent=pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds());tickCountdown();}
+setInterval(tick,1000);tick();
+
+load();updateSchedUI();scheduleNext();render();
+</script>
+</body>
+</html>
