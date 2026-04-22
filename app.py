@@ -1,34 +1,20 @@
 from flask import Flask, jsonify, request
-import urllib.request
-import json
-import ssl
+import yfinance as yf
 import os
 
 app = Flask(__name__)
 
-CTX = ssl.create_default_context()
-CTX.check_hostname = False
-CTX.verify_mode = ssl.CERT_NONE
-
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'Accept': 'application/json',
-    'Referer': 'https://finance.yahoo.com',
-}
-
 def fetch_stock(code):
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}.TW?interval=1d&range=5d"
     try:
-        req = urllib.request.Request(url, headers=HEADERS)
-        with urllib.request.urlopen(req, context=CTX, timeout=10) as r:
-            data = json.loads(r.read())
-        meta = data['chart']['result'][0]['meta']
-        price = float(meta.get('regularMarketPrice') or 0)
-        prev  = float(meta.get('chartPreviousClose') or price)
-        vol   = int(meta.get('regularMarketVolume') or 0)
+        ticker = yf.Ticker(f"{code}.TW")
+        info = ticker.fast_info
+        price  = round(float(info.last_price or 0), 2)
+        prev   = round(float(info.previous_close or price), 2)
+        vol    = int(info.three_month_average_volume or 0) // 1000
         change = round((price - prev) / prev * 100, 2) if prev > 0 else 0
-        return {'code': code, 'price': round(price,2), 'change': change, 'volume': vol // 1000, 'error': False}
+        return {'code': code, 'price': price, 'change': change, 'volume': vol, 'error': False}
     except Exception as e:
+        print(f"[WARN] {code}: {e}")
         return {'code': code, 'price': 0, 'change': 0, 'volume': 0, 'error': True}
 
 @app.route('/quote')
