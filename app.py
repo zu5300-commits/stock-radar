@@ -1,7 +1,8 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 import urllib.request
 import json
 import ssl
+import os
 
 app = Flask(__name__)
 
@@ -32,7 +33,6 @@ def fetch_stock(code):
 
 @app.route('/quote')
 def quote():
-    from flask import request
     codes = request.args.get('codes', '').split(',')
     result = {}
     for code in codes:
@@ -47,7 +47,8 @@ def health():
 
 @app.route('/')
 def index():
-    with open('index.html', encoding='utf-8') as f:
+    base = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(base, 'index.html'), encoding='utf-8') as f:
         return f.read()
 
 if __name__ == '__main__':
