@@ -41,10 +41,10 @@ def fetch_stock(code):
             date = row['date']
             name = row.get('name','')
             net  = int(row.get('buy',0)) - int(row.get('sell',0))
-            if '外資' in name and '自營' not in name:
-                daily[date]['foreign'] = net
-            elif '投信' in name:
-                daily[date]['trust'] = net
+            if name == 'Foreign_Investor':
+    daily[date]['foreign'] = net
+elif name == 'Investment_Trust':
+    daily[date]['trust'] = net
 
         dates = sorted(daily.keys(), reverse=True)
         foreign_days = 0
