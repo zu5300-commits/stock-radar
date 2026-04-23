@@ -19,21 +19,27 @@ def fm(dataset, stock_id, start):
     return r.json().get("data", [])
 
 
+def to_int(val):
+    """安全轉整數，支援含逗號字串如 '1,234,567'"""
+    try:
+        return int(str(val).replace(",", ""))
+    except (ValueError, TypeError):
+        return 0
+
+
 def calc_consecutive_days(inst, target_name):
     """
     計算某個法人（target_name）連續淨買超的天數。
     inst: FinMind TaiwanStockInstitutionalInvestorsBuySell 的資料列表
     target_name: "Foreign_Investor" 外資 / "Investment_Trust" 投信
     """
-    # 先整理成 {date: net} dict
     daily = {}
     for row in inst:
-        if row.get("name") == target_name:
+        if row.get("name", "").strip() == target_name:
             date = row["date"]
-            net = int(row.get("buy", 0)) - int(row.get("sell", 0))
+            net = to_int(row.get("buy", 0)) - to_int(row.get("sell", 0))
             daily[date] = net
 
-    # 從最新日期往回數，連續淨買超天數
     count = 0
     for date in sorted(daily.keys(), reverse=True):
         if daily[date] > 0:
@@ -88,6 +94,16 @@ def quote():
         if code:
             result[code] = fetch_stock(code)
     return jsonify({"ok": True, "data": result})
+
+
+@app.route("/debug/<code>")
+def debug(code):
+    """回傳原始 FinMind 資料，用來確認欄位名稱與內容"""
+    start_30 = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    inst = fm("TaiwanStockInstitutionalInvestorsBuySell", code, start_30)
+    names = list({r.get("name") for r in inst})
+    sample = inst[:5] if inst else []
+    return jsonify({"names_found": names, "sample": sample, "total_rows": len(inst)})
 
 
 @app.route("/health")
