@@ -2,12 +2,12 @@ from flask import Flask, jsonify, request
 import requests as req
 import os
 from datetime import datetime, timedelta
-from collections import defaultdict
 
 app = Flask(__name__)
 
 TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiV2luIiwiZW1haWwiOiJ6dTUzMDBAZ21haWwuY29tIn0.q5_lYazAnsTiNGKFdVNlIReL8Kq_FdwnkMd7IZKcPJI"
 BASE = "https://api.finmindtrade.com/api/v4/data"
+
 
 def fm(dataset, stock_id, start):
     r = req.get(BASE, params={
@@ -18,14 +18,22 @@ def fm(dataset, stock_id, start):
     }, timeout=15)
     return r.json().get("data", [])
 
+
 def calc_consecutive_days(inst, target_name):
+    """
+    計算某個法人（target_name）連續淨買超的天數。
+    inst: FinMind TaiwanStockInstitutionalInvestorsBuySell 的資料列表
+    target_name: "Foreign_Investor" 外資 / "Investment_Trust" 投信
+    """
+    # 先整理成 {date: net} dict
     daily = {}
     for row in inst:
-        date = row["date"]
-        name = row.get("name", "")
-        if name == target_name:
+        if row.get("name") == target_name:
+            date = row["date"]
             net = int(row.get("buy", 0)) - int(row.get("sell", 0))
             daily[date] = net
+
+    # 從最新日期往回數，連續淨買超天數
     count = 0
     for date in sorted(daily.keys(), reverse=True):
         if daily[date] > 0:
@@ -34,13 +42,16 @@ def calc_consecutive_days(inst, target_name):
             break
     return count
 
+
 def fetch_stock(code):
     try:
         start_30 = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
 
+        # 股價
         prices = fm("TaiwanStockPrice", code, start_30)
         if not prices:
-            return {"code": code, "price": 0, "change": 0, "volume": 0, "foreign_days": 0, "trust_days": 0, "error": True}
+            return {"code": code, "price": 0, "change": 0, "volume": 0,
+                    "foreign_days": 0, "trust_days": 0, "error": True}
 
         latest = prices[-1]
         price = float(latest.get("close") or 0)
@@ -48,6 +59,7 @@ def fetch_stock(code):
         change = round((price - prev) / prev * 100, 2) if prev > 0 else 0
         volume = int(latest.get("Trading_Volume") or 0) // 1000
 
+        # 三大法人
         inst = fm("TaiwanStockInstitutionalInvestorsBuySell", code, start_30)
         foreign_days = calc_consecutive_days(inst, "Foreign_Investor")
         trust_days = calc_consecutive_days(inst, "Investment_Trust")
@@ -63,7 +75,9 @@ def fetch_stock(code):
         }
     except Exception as e:
         print(f"[ERR] {code}: {e}")
-        return {"code": code, "price": 0, "change": 0, "volume": 0, "foreign_days": 0, "trust_days": 0, "error": True}
+        return {"code": code, "price": 0, "change": 0, "volume": 0,
+                "foreign_days": 0, "trust_days": 0, "error": True}
+
 
 @app.route("/quote")
 def quote():
@@ -75,15 +89,18 @@ def quote():
             result[code] = fetch_stock(code)
     return jsonify({"ok": True, "data": result})
 
+
 @app.route("/health")
 def health():
     return jsonify({"ok": True})
+
 
 @app.route("/")
 def index():
     base = os.path.dirname(os.path.abspath(__file__))
     with open(os.path.join(base, "index.html"), encoding="utf-8") as f:
         return f.read()
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
