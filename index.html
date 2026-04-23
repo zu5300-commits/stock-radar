@@ -212,7 +212,7 @@ table.st tr:last-child td{border-bottom:none;}
 <div class="tbl-wrap">
 <table class="mt">
   <thead><tr>
-    <th>股票</th><th>現價</th><th>漲跌</th><th>成交量</th><th>星級</th><th>策略</th><th>追蹤</th>
+    <th>股票</th><th>現價</th><th>漲跌</th><th>成交量</th><th>外資連買</th><th>投信連買</th><th>策略</th><th>追蹤</th>
   </tr></thead>
   <tbody id="tbody"></tbody>
 </table>
@@ -242,9 +242,9 @@ const WATCH_CODES = [
   {code:'2303',name:'聯電',sector:'半導體'},
 ];
 
-const isWind  = s => s.price>0 && s.change>0 && s.volume>1000;
+const isWind  = s => s.change>0 && (s.foreign_days||0)>=3 && (s.trust_days||0)>=3;
 const isRD    = s => s.price>100 && s.change>-3;
-const isBuyup = s => s.price>0 && s.volume>5000 && s.change>0;
+const isBuyup = s => (s.foreign_days||0)>=3 || (s.trust_days||0)>=3;
 const metNow  = s => { const m=[]; if(isWind(s))m.push('wind'); if(isRD(s))m.push('rd'); if(isBuyup(s))m.push('buyup'); return m; };
 
 let liveData={}, wl={}, lastFetch=null;
@@ -406,7 +406,7 @@ function render(){
   document.getElementById('rc').textContent=list.length;
   const tbody=document.getElementById('tbody');
   if(!list.length){
-    tbody.innerHTML=`<tr><td colspan="7"><div class="empty"><div class="empty-ic">📥</div>點「抓取行情」載入真實數據</div></td></tr>`;
+    tbody.innerHTML=`<tr><td colspan="9"><div class="empty"><div class="empty-ic">📥</div>點「抓取行情」載入真實數據</div></td></tr>`;
   } else {
     tbody.innerHTML=list.map((s,i)=>{
       const inW=!!wl[s.code];const cs=inW?wl[s.code].stars:0;const windNow=isWind(s);const w=wl[s.code];const buf=w?.windMissCount||0;
@@ -418,6 +418,8 @@ function render(){
         <td><div class="pv ${cc(s.change)}">${hp?fmtP(s.price):'—'}</div></td>
         <td><div class="pv ${cc(s.change)}" style="font-size:13px">${hp?ps(s.change)+s.change.toFixed(2)+'%'+sg(s.change):'—'}</div></td>
         <td><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--txt2)">${hp?s.volume.toLocaleString()+'張':'—'}</span></td>
+        <td><span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:${(s.foreign_days||0)>=3?'var(--green)':'var(--txt2)'}">${hp?(s.foreign_days||0)+'天':'—'}</span></td>
+        <td><span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:${(s.trust_days||0)>=3?'var(--pink)':'var(--txt2)'}">${hp?(s.trust_days||0)+'天':'—'}</span></td>
         <td>${inW?starsHTML(cs):'—'}</td>
         <td>${badgesHTML(s.met||[])}</td>
         <td><span class="wbtn ${inW?'on':'off'}" onclick="${inW?`removeFromWatch('${s.code}')`:`addToWatch('${s.code}')`}">${inW?'♥':'♡'}</span></td>
