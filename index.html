@@ -229,18 +229,7 @@ table.st tr:last-child td{border-bottom:none;}
 
 <script>
 const WIND_BUFFER = 2;
-const WATCH_CODES = [
-  {code:'2330',name:'台積電',sector:'半導體'},
-  {code:'2317',name:'鴻海',sector:'電子零組件'},
-  {code:'2454',name:'聯發科',sector:'半導體'},
-  {code:'3661',name:'世芯-KY',sector:'半導體'},
-  {code:'2382',name:'廣達',sector:'電腦及週邊'},
-  {code:'6669',name:'緯穎',sector:'電腦及週邊'},
-  {code:'3035',name:'智原',sector:'半導體'},
-  {code:'2308',name:'台達電',sector:'電子零組件'},
-  {code:'4958',name:'臻鼎-KY',sector:'電子零組件'},
-  {code:'2303',name:'聯電',sector:'半導體'},
-];
+let WATCH_CODES = [];
 
 const isWind  = s => s.change>0 && (s.foreign_days||0)>=3 && (s.trust_days||0)>=3;
 const isRD    = s => s.price>100 && s.change>-3;
@@ -282,32 +271,76 @@ function processDailySnapshot(){
     const w=wl[code];const s=liveData[code];if(!s)return;
     const alreadyToday=w.snapshots.some(sn=>sn.date===today&&sn.type!=='wind-lost');
     if(alreadyToday)return;
+
     const met=metNow(s);const windNow=isWind(s);const iso=nowISO();
+
+    // 取上一筆非消失快照，用來比較策略數量變化
+    const lastSnap=w.snapshots.filter(sn=>sn.type!=='wind-lost').slice(-1)[0];
+    const prevMet=lastSnap?(lastSnap.met||[]):[];
+
+    // === 風口緩衝邏輯 ===
+    let windRetriggered=false;
     if(w.windActive&&!windNow){
       w.windMissCount=(w.windMissCount||0)+1;
       if(w.windMissCount>=WIND_BUFFER){
+        // 連續2日消失，正式記錄風口消失
         w.windActive=false;w.windMissCount=0;
-        w.snapshots.push({type:'wind-lost',label:`🌪️ 風口消失（連續${WIND_BUFFER}日）`,date:today,iso,price:null,stars:w.stars,windCycle:w.windCycles,met:[]});
+        w.snapshots.push({type:'wind-lost',label:`🌪️ 風口消失（連續${WIND_BUFFER}日）`,
+          date:today,iso,price:null,stars:w.stars,windCycle:w.windCycles,met:[]});
+        // 繼續往下記錄當日快照
       } else {
-        w.snapshots.push({type:'daily',label:`📅 快照（緩衝${w.windMissCount}/${WIND_BUFFER}）`,date:today,iso,price:s.price,stars:w.stars,windCycle:w.windCycles,met});
+        // 緩衝中，記錄後直接返回
+        w.snapshots.push({type:'daily',label:`📅 快照（風口緩衝${w.windMissCount}/${WIND_BUFFER}）`,
+          date:today,iso,price:s.price,stars:w.stars,windCycle:w.windCycles,met});
         return;
       }
+    } else if(!w.windActive&&windNow){
+      // 風口重觸發
+      w.windActive=true;w.windMissCount=0;
+      w.windCycles=(w.windCycles||0)+1;
+      windRetriggered=true;
+    } else if(w.windActive&&windNow){
+      w.windMissCount=0;
     }
-    if(!w.windActive&&windNow){
-      const everLost=w.snapshots.some(sn=>sn.type==='wind-lost');
-      if(everLost){
-        const old=w.stars;const nw=Math.min(w.stars+1,3);
-        w.stars=nw;w.windActive=true;w.windMissCount=0;w.windCycles+=1;w.hasBuySignal=true;
-        w.snapshots.push({type:'wind-retrigger',label:`🔄 風口重觸發→升至${SL[nw]}`,date:today,iso,price:s.price,stars:nw,windCycle:w.windCycles,met});
-        alerts.push({code,old,nw,price:s.price,name:s.name});
-        if(nw>=3)setTimeout(()=>showModal3Star(code),1800);
-        return;
-      } else {w.windActive=true;w.windMissCount=0;}
+
+    // === 升星判斷 ===
+    const prevCount=prevMet.length;
+    const currCount=met.length;
+    let newStars=w.stars;
+    let upgradeReason='';
+
+    if(windRetriggered){
+      // 風口重觸發：升1星（上限3星）
+      newStars=Math.min(w.stars+1,3);
+      upgradeReason=`風口重觸發（第${w.windCycles}次）`;
+    } else if(currCount>=3&&w.stars<3){
+      // 同時滿足全部3個策略 → 直升3星
+      newStars=3;
+      upgradeReason='同時滿足全部3個策略';
+    } else if(currCount>=2&&prevCount<2&&w.stars<2){
+      // 從1個策略增加到2個策略 → 升至2星
+      newStars=2;
+      upgradeReason='同時滿足2個策略';
     }
-    w.snapshots.push({type:'daily',label:'📅 每日快照',date:today,iso,price:s.price,stars:w.stars,windCycle:w.windCycles,met});
+
+    const upgraded=newStars>w.stars;
+
+    if(upgraded){
+      const old=w.stars;
+      w.stars=newStars;w.hasBuySignal=true;
+      w.snapshots.push({type:'wind-retrigger',
+        label:`🔄 升至${SL[newStars]}（${upgradeReason}）`,
+        date:today,iso,price:s.price,stars:newStars,windCycle:w.windCycles,met});
+      alerts.push({code,old,nw:newStars,price:s.price,name:s.name,reason:upgradeReason});
+      if(newStars>=3)setTimeout(()=>showModal3Star(code),1800);
+    } else {
+      w.snapshots.push({type:'daily',label:'📅 每日快照',
+        date:today,iso,price:s.price,stars:w.stars,windCycle:w.windCycles,met});
+    }
   });
+
   alerts.forEach((a,i)=>{
-    setTimeout(()=>showModalBuy(a.code,a.old,a.nw),i*600+300);
+    setTimeout(()=>showModalBuy(a.code,a.old,a.nw,a.reason),i*600+300);
     showToast(`🚨 ${a.name} 升至${SL[a.nw]} @ ${fmtP(a.price)}`,'buy');
   });
   lastFetch=nowISO();save();render();updateSchedUI();
@@ -320,22 +353,23 @@ async function manualFetch(){
   const btn=document.getElementById('btn-fetch');
   const ic=document.getElementById('fic');
   btn.classList.add('busy');ic.innerHTML='<span class="spin"></span>';
-  showToast('正在抓取 Yahoo Finance 數據...','info');
-  const codes=WATCH_CODES.map(c=>c.code).join(',');
+  showToast('正在掃描成交市值前100檔，約需30秒...','info');
   try{
-    const res=await fetch(`/quote?codes=${codes}`,{signal:AbortSignal.timeout(30000)});
+    const res=await fetch('/quote',{signal:AbortSignal.timeout(120000)});
     const json=await res.json();
+    if(!json.ok){showToast('❌ '+(json.error||'抓取失敗'),'warn');btn.classList.remove('busy');ic.textContent='⬇';return;}
     const data=json.data||{};
+    WATCH_CODES=Object.values(data).map(d=>({code:d.code,name:d.name||d.code,sector:d.sector||'—'}));
     let ok=0,fail=0;
     WATCH_CODES.forEach(item=>{
       const d=data[item.code];
       if(d&&d.price>0&&!d.error){
         liveData[item.code]={...item,...d,met:metNow(d)};ok++;
       } else {
-        liveData[item.code]={...item,price:0,change:0,volume:0,met:[]};fail++;
+        liveData[item.code]={...item,price:0,change:0,volume:0,foreign_days:0,trust_days:0,met:[]};fail++;
       }
     });
-    showToast(`✅ 更新完成：${ok}檔${fail>0?' / '+fail+'失敗':''}`,fail>0?'warn':'ok');
+    showToast(`✅ 掃描完成：${ok}檔${fail>0?' / '+fail+'失敗':''}`,fail>0?'warn':'ok');
     processDailySnapshot();
   } catch(e){
     showToast('❌ 抓取失敗，請稍後再試','warn');
@@ -456,13 +490,13 @@ function buildSnapTbl(snaps,curP){
   return `<table class="st" style="width:100%"><thead><tr><th>事件</th><th>日期</th><th>股價</th><th>現價/漲跌</th></tr></thead>
   <tbody>${snaps.filter(sn=>sn.type!=='wind-lost').map(sn=>{const d=pDiff(sn.price,curP);return `<tr><td><span class="evdot ${dotCls(sn.type)}" style="display:inline-block"></span><span class="${evCls(sn.type)}">${sn.label}</span></td><td class="dtc">${fmtDT(sn.iso)}</td><td><span class="pbig">${fmtP(sn.price)}</span></td><td>${chgTag(d)}</td></tr>`;}).join('')}</tbody></table>`;
 }
-function showModalBuy(code,old,nw){
+function showModalBuy(code,old,nw,reason){
   const s=liveData[code]||{};const w=wl[code];if(!w)return;
   document.getElementById('modal').className='modal mb';
   document.getElementById('m-ic').textContent='🚨';
-  document.getElementById('m-title').textContent='買入訊號！風口重觸發';
+  document.getElementById('m-title').textContent='升星通知！';
   document.getElementById('m-sub').textContent=`${s.name||code}（${code}）`;
-  document.getElementById('m-extra').innerHTML=`<div class="m-upgrade"><div class="m-sf">${SL[old]}</div><div class="m-arr">→</div><div class="m-st">${SL[nw]}</div></div><div class="m-price">${fmtP(s.price)}</div><div class="m-plabel">第 ${w.windCycles} 次重觸發</div>`;
+  document.getElementById('m-extra').innerHTML=`<div class="m-upgrade"><div class="m-sf">${SL[old]||'—'}</div><div class="m-arr">→</div><div class="m-st">${SL[nw]}</div></div><div class="m-price">${fmtP(s.price)}</div><div class="m-plabel">${reason||''}</div>`;
   document.getElementById('m-tbl').innerHTML=buildSnapTbl(w.snapshots,s.price||0);
   document.getElementById('overlay').classList.add('show');
 }
@@ -482,18 +516,4 @@ document.getElementById('overlay').addEventListener('click',e=>{if(e.target===e.
 function doExport(){
   const keys=Object.keys(wl);if(!keys.length){showToast('追蹤名單為空','info');return;}
   let csv='名稱,代碼,事件,日期,股價,星級,風口次數,策略\n';
-  keys.forEach(code=>{const s=liveData[code]||WATCH_CODES.find(x=>x.code===code)||{name:code};(wl[code].snapshots||[]).forEach(sn=>{csv+=`${s.name||code},${code},"${sn.label}",${sn.date},${sn.price??''},${sn.stars},${sn.windCycle||0},"${(sn.met||[]).join('/')}"\n`;});});
-  const area=document.getElementById('export-area');area.style.display=area.style.display==='block'?'none':'block';area.textContent=csv;
-  try{navigator.clipboard.writeText(csv);showToast('✅ CSV 已複製','ok');}catch(e){}
-}
-
-let _tt;
-function showToast(msg,type='info'){const el=document.getElementById('toast');el.textContent=msg;el.className=`toast show ${type}`;clearTimeout(_tt);_tt=setTimeout(()=>el.classList.remove('show'),3500);}
-
-function tick(){const d=new Date();document.getElementById('clock').textContent=pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds());tickCountdown();}
-setInterval(tick,1000);tick();
-
-load();updateSchedUI();scheduleNext();render();
-</script>
-</body>
-</html>
+  keys.forEach(code=>{const s=liveData[code]||WATCH_CODES.find(x=>x.code===code)||{name:code};(wl[code].snapshots||[]).forEach(sn=>{csv+=`${s.name||code},${code},"${sn.label}",${sn.date},${sn.price??''},${sn.stars},${sn.windCycle||0},"${(sn.met||[]).joi
