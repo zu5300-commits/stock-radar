@@ -457,7 +457,7 @@ function render(){
         <td><span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:${(s.trust_days||0)>=3?'var(--pink)':'var(--txt2)'}">${hp?(s.trust_days||0)+'天':'—'}</span></td>
         <td>${inW?starsHTML(cs):'—'}</td>
         <td>${badgesHTML(s.met||[])}</td>
-        <td><span class="wbtn ${inW?'on':'off'}" onclick="${inW?`removeFromWatch('${s.code}')`:`addToWatch('${s.code}')`}">${inW?'♥':'♡'}</span></td>
+        <td><span class="wbtn ${inW?'on':'off'}" onclick="${inW?'removeFromWatch':'addToWatch'}('${s.code}')">${inW?'♥':'♡'}</span></td>
       </tr>`;
     }).join('');
   }
@@ -517,4 +517,30 @@ document.getElementById('overlay').addEventListener('click',e=>{if(e.target===e.
 function doExport(){
   const keys=Object.keys(wl);if(!keys.length){showToast('追蹤名單為空','info');return;}
   let csv='名稱,代碼,事件,日期,股價,星級,風口次數,策略\n';
-  keys.forEach(code=>{const s=liveData[code]||WATCH_CODES.find(x=>x.code===code)||{name:code};(wl[code].snapshots||[]).forEach(sn=>{csv+=`${s.name||code},${code},"${sn.label}",${sn.date},${sn.price??''},${sn.stars},${sn.windCycle||0},"
+  keys.forEach(code=>{const s=liveData[code]||WATCH_CODES.find(x=>x.code===code)||{name:code};(wl[code].snapshots||[]).forEach(sn=>{csv+=`${s.name||code},${code},"${sn.label}",${sn.date},${sn.price??''},${sn.stars},${sn.windCycle||0},"${(sn.met||[]).join('/')}"\n`;});});
+  const area=document.getElementById('export-area');area.style.display=area.style.display==='block'?'none':'block';area.textContent=csv;
+  try{navigator.clipboard.writeText(csv);showToast('✅ CSV 已複製','ok');}catch(e){}
+}
+
+let _tt;
+function showToast(msg,type='info'){const el=document.getElementById('toast');el.textContent=msg;el.className=`toast show ${type}`;clearTimeout(_tt);_tt=setTimeout(()=>el.classList.remove('show'),3500);}
+
+function tick(){const d=new Date();document.getElementById('clock').textContent=pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds());tickCountdown();}
+setInterval(tick,1000);tick();
+
+load();updateSchedUI();scheduleNext();render();
+
+// 確保所有函數在全域可存取（修復 onclick 找不到函數的問題）
+window.manualFetch=manualFetch;
+window.switchTab=switchTab;
+window.addToWatch=addToWatch;
+window.removeFromWatch=removeFromWatch;
+window.doExport=doExport;
+window.clearAll=clearAll;
+window.dismissBuy=dismissBuy;
+window.closeModal=closeModal;
+window.addAllVisible=addAllVisible;
+window.toggleExpand=toggleExpand;
+</script>
+</body>
+</html>
