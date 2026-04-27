@@ -81,14 +81,29 @@ def get_top100_prices():
     if cached:
         return cached
 
-    start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-    r = req.get(BASE, params={
-        "dataset": "TaiwanStockPrice",
-        "start_date": start,
-        "token": TOKEN
-    }, timeout=120)
-    data = r.json().get("data", [])
+    # 往前找 14 天，週末也能找到最近的交易日
+    start = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
+    try:
+        r = req.get(BASE, params={
+            "dataset": "TaiwanStockPrice",
+            "start_date": start,
+            "token": TOKEN
+        }, timeout=120)
+        resp = r.json()
+    except Exception as e:
+        print(f"[ERROR] TaiwanStockPrice request failed: {e}")
+        return [], {}, None
+
+    # 檢查 FinMind API 狀態
+    status = resp.get("status", 200)
+    if status != 200:
+        msg = resp.get("msg", resp.get("message", "unknown"))
+        print(f"[ERROR] FinMind API status={status} msg={msg}")
+        return [], {}, f"FinMind API 錯誤：{msg}"
+
+    data = resp.get("data", [])
     if not data:
+        print("[WARN] TaiwanStockPrice returned empty data")
         return [], {}, None
 
     dates = sorted(set(d["date"] for d in data), reverse=True)
@@ -144,9 +159,11 @@ def quote():
     try:
         start_30 = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
 
-        top100, price_data, latest_date = get_top100_prices()
+        result_prices = get_top100_prices()
+        top100, price_data, latest_date = result_prices
         if not top100:
-            return jsonify({"ok": False, "error": "無法取得股價資料"})
+            err_msg = latest_date if isinstance(latest_date, str) else "無法取得股價資料（可能是週末或 FinMind API 限制）"
+            return jsonify({"ok": False, "error": err_msg})
 
         stock_info = load_stock_info()
 
