@@ -349,7 +349,7 @@ function processDailySnapshot(){
 const isWeekend=()=>{const d=new Date().getDay();return d===0||d===6;};
 
 async function manualFetch(){
-  if(isWeekend()){showToast('週末休市','warn');return;}
+  if(isWeekend())showToast('⚠️ 週末休市，資料僅供參考','warn');
   const btn=document.getElementById('btn-fetch');
   const ic=document.getElementById('fic');
   btn.classList.add('busy');ic.innerHTML='<span class="spin"></span>';
@@ -380,6 +380,7 @@ async function manualFetch(){
 
 function msUntil19(){const now=new Date(),next=new Date(now);next.setHours(19,0,0,0);if(next<=now)next.setDate(next.getDate()+1);return next-now;}
 function scheduleNext(){setTimeout(()=>{if(!isWeekend())manualFetch();scheduleNext();},msUntil19());}
+// 排程不變，只有自動觸發才檢查週末
 function updateSchedUI(){
   document.getElementById('last-fetch').textContent=lastFetch?fmtDT(lastFetch):'尚未抓取';
   const done=lastFetch&&new Date(lastFetch).toDateString()===new Date().toDateString();
@@ -516,4 +517,4 @@ document.getElementById('overlay').addEventListener('click',e=>{if(e.target===e.
 function doExport(){
   const keys=Object.keys(wl);if(!keys.length){showToast('追蹤名單為空','info');return;}
   let csv='名稱,代碼,事件,日期,股價,星級,風口次數,策略\n';
-  keys.forEach(code=>{const s=liveData[code]||WATCH_CODES.find(x=>x.code===code)||{name:code};(wl[code].snapshots||[]).forEach(sn=>{csv+=`${s.name||code},${code},"${sn.label}",${sn.date},${sn.price??''},${sn.stars},${sn.windCycle||0},"${(sn.met||[]).joi
+  keys.forEach(code=>{const s=liveData[code]||WATCH_CODES.find(x=>x.code===code)||{name:code};(wl[code].snapshots||[]).forEach(sn=>{csv+=`${s.name||code},${code},"${sn.label}",${sn.date},${sn.price??''},${sn.stars},${sn.windCycle||0
