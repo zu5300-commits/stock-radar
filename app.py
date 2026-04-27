@@ -1,9 +1,13 @@
 from flask import Flask, jsonify
 import requests as req
+import urllib3
 import os
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+
+# TWSE 憑證有 Missing Subject Key Identifier 問題，停用 SSL 警告
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 
@@ -95,7 +99,7 @@ def fetch_twse_day(date_str):
     for url in urls:
         try:
             r = req.get(url, params={"response": "json", "date": date_str},
-                        headers=TWSE_HEADERS, timeout=30)
+                        headers=TWSE_HEADERS, timeout=30, verify=False)
             resp = r.json()
             rows = resp.get("data", [])
             print(f"[TWSE] {url} date={date_str} "
@@ -249,7 +253,7 @@ def debug_twse():
         ]:
             try:
                 r = req.get(url, params={"response": "json", "date": date_str},
-                            headers=TWSE_HEADERS, timeout=20)
+                            headers=TWSE_HEADERS, timeout=20, verify=False)
                 resp = r.json()
                 rows = resp.get("data", [])
                 results.append({
