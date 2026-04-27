@@ -2,44 +2,50 @@ from flask import Flask, jsonify, request
 import requests as req
 import os
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 app = Flask(__name__)
 
 TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiV2luIiwiZW1haWwiOiJ6dTUzMDBAZ21haWwuY29tIn0.q5_lYazAnsTiNGKFdVNlIReL8Kq_FdwnkMd7IZKcPJI"
 BASE = "https://api.finmindtrade.com/api/v4/data"
 
+_cache = {}
+_cache_lock = threading.Lock()
 
-def fm(dataset, stock_id, start):
-    r = req.get(BASE, params={
-        "dataset": dataset,
-        "data_id": stock_id,
-        "start_date": start,
-        "token": TOKEN
-    }, timeout=15)
-    return r.json().get("data", [])
+def get_cache(key):
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry and (datetime.now() - entry["time"]).seconds < 1800:
+            return entry["data"]
+    return None
+
+def set_cache(key, data):
+    with _cache_lock:
+        _cache[key] = {"data": data, "time": datetime.now()}
 
 
 def to_int(val):
-    """安全轉整數，支援含逗號字串如 '1,234,567'"""
     try:
         return int(str(val).replace(",", ""))
     except (ValueError, TypeError):
         return 0
 
 
+def fm(dataset, stock_id, start):
+    params = {"dataset": dataset, "start_date": start, "token": TOKEN}
+    if stock_id:
+        params["data_id"] = stock_id
+    r = req.get(BASE, params=params, timeout=20)
+    return r.json().get("data", [])
+
+
 def calc_consecutive_days(inst, target_name):
-    """
-    計算某個法人（target_name）連續淨買超的天數。
-    inst: FinMind TaiwanStockInstitutionalInvestorsBuySell 的資料列表
-    target_name: "Foreign_Investor" 外資 / "Investment_Trust" 投信
-    """
     daily = {}
     for row in inst:
         if row.get("name", "").strip() == target_name:
-            date = row["date"]
             net = to_int(row.get("buy", 0)) - to_int(row.get("sell", 0))
-            daily[date] = net
-
+            daily[row["date"]] = net
     count = 0
     for date in sorted(daily.keys(), reverse=True):
         if daily[date] > 0:
@@ -49,61 +55,130 @@ def calc_consecutive_days(inst, target_name):
     return count
 
 
-def fetch_stock(code):
+def load_stock_info():
+    cached = get_cache("stock_info")
+    if cached:
+        return cached
     try:
-        start_30 = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        r = req.get(BASE, params={"dataset": "TaiwanStockInfo", "token": TOKEN}, timeout=30)
+        data = r.json().get("data", [])
+        info = {}
+        for item in data:
+            code = item.get("stock_id", "")
+            info[code] = {
+                "name": item.get("stock_name", code),
+                "sector": item.get("industry_category", "—"),
+            }
+        set_cache("stock_info", info)
+        return info
+    except Exception as e:
+        print(f"[WARN] TaiwanStockInfo: {e}")
+        return {}
 
-        # 股價
-        prices = fm("TaiwanStockPrice", code, start_30)
-        if not prices:
-            return {"code": code, "price": 0, "change": 0, "volume": 0,
-                    "foreign_days": 0, "trust_days": 0, "error": True}
 
-        latest = prices[-1]
-        price = float(latest.get("close") or 0)
-        prev = float(prices[-2].get("close") or price) if len(prices) >= 2 else price
-        change = round((price - prev) / prev * 100, 2) if prev > 0 else 0
-        volume = int(latest.get("Trading_Volume") or 0) // 1000
+def get_top100_prices():
+    cached = get_cache("top100_prices")
+    if cached:
+        return cached
 
-        # 三大法人
+    start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    r = req.get(BASE, params={
+        "dataset": "TaiwanStockPrice",
+        "start_date": start,
+        "token": TOKEN
+    }, timeout=120)
+    data = r.json().get("data", [])
+    if not data:
+        return [], {}, None
+
+    dates = sorted(set(d["date"] for d in data), reverse=True)
+    latest_date = dates[0]
+    prev_date = dates[1] if len(dates) > 1 else None
+
+    prev_close = {}
+    if prev_date:
+        for d in data:
+            if d["date"] == prev_date:
+                prev_close[d["stock_id"]] = float(d.get("close") or 0)
+
+    latest_prices = {}
+    for d in data:
+        if d["date"] == latest_date:
+            code = d["stock_id"]
+            close = float(d.get("close") or 0)
+            if close <= 0:
+                continue
+            vol = to_int(d.get("Trading_Volume") or 0)
+            prev = prev_close.get(code, close)
+            change = round((close - prev) / prev * 100, 2) if prev > 0 else 0
+            latest_prices[code] = {
+                "price": round(close, 2),
+                "change": change,
+                "volume": vol // 1000,
+                "trading_value": close * vol,
+            }
+
+    top100 = sorted(latest_prices.keys(),
+                    key=lambda c: latest_prices[c]["trading_value"],
+                    reverse=True)[:100]
+
+    result = (top100, latest_prices, latest_date)
+    set_cache("top100_prices", result)
+    return result
+
+
+def fetch_inst_one(code, start_30):
+    try:
         inst = fm("TaiwanStockInstitutionalInvestorsBuySell", code, start_30)
-        foreign_days = calc_consecutive_days(inst, "Foreign_Investor")
-        trust_days = calc_consecutive_days(inst, "Investment_Trust")
-
-        return {
-            "code": code,
-            "price": price,
-            "change": change,
-            "volume": volume,
-            "foreign_days": foreign_days,
-            "trust_days": trust_days,
-            "error": False
+        return code, {
+            "foreign_days": calc_consecutive_days(inst, "Foreign_Investor"),
+            "trust_days": calc_consecutive_days(inst, "Investment_Trust"),
         }
     except Exception as e:
-        print(f"[ERR] {code}: {e}")
-        return {"code": code, "price": 0, "change": 0, "volume": 0,
-                "foreign_days": 0, "trust_days": 0, "error": True}
+        print(f"[WARN] inst {code}: {e}")
+        return code, {"foreign_days": 0, "trust_days": 0}
 
 
 @app.route("/quote")
 def quote():
-    codes = request.args.get("codes", "").split(",")
-    result = {}
-    for code in codes:
-        code = code.strip()
-        if code:
-            result[code] = fetch_stock(code)
-    return jsonify({"ok": True, "data": result})
+    try:
+        start_30 = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
 
+        top100, price_data, latest_date = get_top100_prices()
+        if not top100:
+            return jsonify({"ok": False, "error": "無法取得股價資料"})
 
-@app.route("/debug/<code>")
-def debug(code):
-    """回傳原始 FinMind 資料，用來確認欄位名稱與內容"""
-    start_30 = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-    inst = fm("TaiwanStockInstitutionalInvestorsBuySell", code, start_30)
-    names = list({r.get("name") for r in inst})
-    sample = inst[:5] if inst else []
-    return jsonify({"names_found": names, "sample": sample, "total_rows": len(inst)})
+        stock_info = load_stock_info()
+
+        inst_results = {}
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(fetch_inst_one, code, start_30): code for code in top100}
+            for future in as_completed(futures, timeout=90):
+                code, inst = future.result()
+                inst_results[code] = inst
+
+        result = {}
+        for code in top100:
+            p = price_data[code]
+            info = stock_info.get(code, {"name": code, "sector": "—"})
+            result[code] = {
+                "code": code,
+                "name": info["name"],
+                "sector": info["sector"],
+                "price": p["price"],
+                "change": p["change"],
+                "volume": p["volume"],
+                "foreign_days": inst_results.get(code, {}).get("foreign_days", 0),
+                "trust_days": inst_results.get(code, {}).get("trust_days", 0),
+                "error": False,
+            }
+
+        return jsonify({"ok": True, "data": result, "date": latest_date})
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": str(e)})
 
 
 @app.route("/health")
