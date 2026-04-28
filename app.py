@@ -564,13 +564,21 @@ def debug_tpex_raw():
             r = req.get(inst_url, params=p, headers=TPEX_HEADERS,
                         timeout=15, verify=False)
             raw = r.json()
-            aa = raw.get("aaData", [])
+            aa    = raw.get("aaData", [])
+            tabs  = raw.get("tables", [])
+            tab0_keys = list(tabs[0].keys()) if tabs else []
+            tab0_aa   = tabs[0].get("aaData", []) if tabs else []
             results.append({
                 "params": p,
                 "status": r.status_code,
                 "keys": list(raw.keys()),
+                "stat": raw.get("stat"),
+                "iTotalRecords": raw.get("iTotalRecords"),
                 "aaData_len": len(aa),
-                "sample": aa[0] if aa else [],
+                "tables_len": len(tabs),
+                "tables_t0_keys": tab0_keys,
+                "tables_t0_aaData_len": len(tab0_aa),
+                "sample": aa[0] if aa else (tab0_aa[0] if tab0_aa else []),
             })
         except Exception as e:
             results.append({"params": p, "error": str(e)})
