@@ -583,23 +583,53 @@ def debug_tpex_raw():
         except Exception as e:
             results.append({"params": p, "error": str(e)})
 
-    # 也試試 OpenAPI institution 端點
-    oa_urls = [
-        f"https://www.tpex.org.tw/openapi/v1/tpex_mainboard_institution_buy_sell_total?date={date_str}&l=zh-tw",
-        f"https://www.tpex.org.tw/openapi/v1/tpex_mainboard_3investors_trade?date={date_str}&l=zh-tw",
-    ]
-    for u in oa_urls:
+    # 第一個 combo 顯示原始 response 文字
+    try:
+        r0 = req.get(inst_url,
+                     params={"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc_slash},
+                     headers=TPEX_HEADERS, timeout=15, verify=False)
+        results.append({
+            "raw_text_first200": r0.text[:200],
+            "content_type": r0.headers.get("Content-Type", ""),
+        })
+    except Exception as e:
+        results.append({"raw_error": str(e)})
+
+    # 試 POST 方式
+    try:
+        rp = req.post(inst_url,
+                      data={"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc_slash},
+                      headers={**TPEX_HEADERS,
+                                "Referer": "https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge.php",
+                                "X-Requested-With": "XMLHttpRequest"},
+                      timeout=15, verify=False)
+        rp_j = rp.json()
+        aa_p = rp_j.get("aaData", [])
+        results.append({
+            "method": "POST",
+            "status": rp.status_code,
+            "aaData_len": len(aa_p),
+            "stat": rp_j.get("stat"),
+            "sample": aa_p[0] if aa_p else [],
+        })
+    except Exception as e:
+        results.append({"method": "POST", "error": str(e)})
+
+    # 也試試較新的 OpenAPI v1 institution 端點（不同名稱）
+    for oa_name in ["tpex_mainboard_institution_buy_sell_total",
+                    "tpex_mainboard_3investors_buy_sell"]:
+        u = f"https://www.tpex.org.tw/openapi/v1/{oa_name}?date={date_str}&l=zh-tw"
         try:
             r = req.get(u, headers=TPEX_HEADERS, timeout=15, verify=False)
-            body = r.text[:300]
-            try:
+            is_json = "json" in r.headers.get("Content-Type", "")
+            body = r.text[:200]
+            if is_json:
                 parsed = r.json()
-                body = f"JSON len={len(parsed) if isinstance(parsed, list) else 'dict'}"
-            except Exception:
-                pass
-            results.append({"url": u, "status": r.status_code, "body_preview": body})
+                body = f"JSON len={len(parsed) if isinstance(parsed, list) else type(parsed)}"
+            results.append({"oa_name": oa_name, "status": r.status_code,
+                            "is_json": is_json, "body": body})
         except Exception as e:
-            results.append({"url": u, "error": str(e)})
+            results.append({"oa_name": oa_name, "error": str(e)})
 
     return jsonify({"date_str": date_str, "roc_slash": roc_slash, "results": results})
 
