@@ -1,6 +1,7 @@
 from flask import Flask, jsonify
 import requests as req
 import urllib3
+import re
 import os
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -186,8 +187,7 @@ def _parse_tpex_prices(rows):
                 continue
 
             chg_s = str(row.get("Change", "0")).replace(",", "").strip()
-            import re as _re
-            chg_s = _re.sub(r"<[^>]+>", "", chg_s).strip()
+            chg_s = re.sub(r"<[^>]+>", "", chg_s).strip()
             diff  = float(chg_s) if chg_s not in ("--", "", "除權息", "除息", "除權") else 0
             prev  = close - diff
             change = round(diff / prev * 100, 2) if prev > 0 else 0
@@ -368,7 +368,7 @@ def get_all_inst_data():
     if cached:
         return cached
 
-    dates = recent_weekdays(22)  # 22 個工作日 ≈ 1 個月
+    dates = recent_weekdays(7)   # 7 個工作日足夠判斷連續 ≥3 天
     all_days = {}  # {date_str: {code: (f_net, t_net)}}
     _lock = threading.Lock()
 
@@ -380,11 +380,11 @@ def get_all_inst_data():
                 all_days[date_str].update(day_data)
 
     # TWSE 和 TPEX 各自獨立提交，完全並行
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    with ThreadPoolExecutor(max_workers=14) as executor:
         twse_futs = {executor.submit(_fetch_t86_day, d): d for d in dates}
         tpex_futs = {executor.submit(_fetch_tpex_inst_day, d): d for d in dates}
         all_futs  = {**twse_futs, **tpex_futs}
-        for future in as_completed(all_futs, timeout=80):
+        for future in as_completed(all_futs, timeout=50):
             date_str, day_data = future.result()
             _merge(date_str, day_data)
 
