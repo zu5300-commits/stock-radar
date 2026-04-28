@@ -478,12 +478,17 @@ def debug_t86():
                         params={"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc},
                         headers=TPEX_HEADERS, timeout=20, verify=False)
             resp = r.json()
-            rows = resp.get("aaData", [])
+            tables = resp.get("tables", [])
+            aaData = resp.get("aaData", [])
+            rows = aaData or (tables[0].get("body", tables[0].get("data", [])) if tables else [])
             results.append({
                 "source": "TPEX-inst", "date": date_str, "roc": roc,
+                "all_keys": list(resp.keys()),
+                "tables_len": len(tables),
+                "tables_keys": list(tables[0].keys()) if tables else [],
+                "aaData_len": len(aaData),
                 "row_count": len(rows),
                 "sample": rows[:2] if rows else [],
-                "all_keys": list(resp.keys()),
             })
         except Exception as e:
             results.append({"source": "TPEX-inst", "date": date_str, "error": str(e)})
@@ -496,12 +501,17 @@ def debug_t86():
                         params={"l": "zh-tw", "d": roc, "se": "EW", "s": "0,asc,0"},
                         headers=TPEX_HEADERS, timeout=20, verify=False)
             resp = r.json()
-            rows = resp.get("aaData", [])
+            tables = resp.get("tables", [])
+            aaData = resp.get("aaData", [])
+            rows = aaData or (tables[0].get("body", tables[0].get("data", [])) if tables else [])
             results.append({
                 "source": "TPEX-price", "date": date_str, "roc": roc,
+                "all_keys": list(resp.keys()),
+                "tables_len": len(tables),
+                "tables_keys": list(tables[0].keys()) if tables else [],
+                "aaData_len": len(aaData),
                 "row_count": len(rows),
                 "sample": rows[:2] if rows else [],
-                "all_keys": list(resp.keys()),
             })
         except Exception as e:
             results.append({"source": "TPEX-price", "date": date_str, "error": str(e)})
