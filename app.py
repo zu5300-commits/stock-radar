@@ -11,9 +11,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 
-FM_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiV2luIiwiZW1haWwiOiJ6dTUzMDBAZ21haWwuY29tIn0.q5_lYazAnsTiNGKFdVNlIReL8Kq_FdwnkMd7IZKcPJI"
-FM_BASE  = "https://api.finmindtrade.com/api/v4/data"
-
 TWSE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -60,22 +57,7 @@ def parse_twse_date(raw):
     return raw
 
 
-def calc_consecutive_days(inst, target_name):
-    daily = {}
-    for row in inst:
-        if row.get("name", "").strip() == target_name:
-            net = to_int(row.get("buy", 0)) - to_int(row.get("sell", 0))
-            daily[row["date"]] = net
-    count = 0
-    for date in sorted(daily.keys(), reverse=True):
-        if daily[date] > 0:
-            count += 1
-        else:
-            break
-    return count
-
-
-def recent_weekdays(n=7):
+def recent_weekdays(n=30):
     """回傳最近 n 個工作日（西元格式 YYYYMMDD）"""
     result = []
     d = datetime.now()
@@ -179,29 +161,118 @@ def get_top100_prices():
     return result
 
 
-def fetch_inst_one(code, start_30):
+# ── TWSE T86 三大法人（取代 FinMind，無需帳號、無速率限制）─────────────────────
+
+def _fetch_t86_day(date_str):
+    """
+    抓取 TWSE T86 三大法人買賣超（單日）。
+    回傳 (date_str, {code: (foreign_net, trust_net)})
+    """
+    url = "https://www.twse.com.tw/rwd/zh/fund/T86"
     try:
-        r = req.get(FM_BASE, params={
-            "dataset":    "TaiwanStockInstitutionalInvestorsBuySell",
-            "data_id":    code,
-            "start_date": start_30,
-            "token":      FM_TOKEN,
-        }, timeout=20)
-        inst = r.json().get("data", [])
-        return code, {
-            "foreign_days": calc_consecutive_days(inst, "Foreign_Investor"),
-            "trust_days":   calc_consecutive_days(inst, "Investment_Trust"),
-        }
+        r = req.get(url,
+                    params={"response": "json", "date": date_str, "selectType": "ALL"},
+                    headers=TWSE_HEADERS, timeout=30, verify=False)
+        resp = r.json()
+        if resp.get("stat") != "OK":
+            print(f"[T86] {date_str} stat={resp.get('stat','?')} → skip")
+            return date_str, {}
+
+        rows   = resp.get("data", [])
+        fields = resp.get("fields", [])
+        print(f"[T86] {date_str} rows={len(rows)}")
+
+        # 自動偵測欄位索引（以 fields 陣列為準，預設值為已知常見格式）
+        f_idx, t_idx = 4, 13
+        for i, f in enumerate(fields):
+            if "外資" in f and "買賣超" in f and "自營" not in f and i < 12:
+                f_idx = i
+            if "投信" in f and "買賣超" in f:
+                t_idx = i
+
+        day = {}
+        for row in rows:
+            try:
+                code = str(row[0]).strip()
+                # 過濾非股票列（如合計列）
+                if not code or not code[0].isdigit():
+                    continue
+                foreign_net = to_int(row[f_idx])
+                trust_net   = to_int(row[t_idx])
+                day[code]   = (foreign_net, trust_net)
+            except (IndexError, Exception):
+                continue
+        return date_str, day
+
     except Exception as e:
-        print(f"[WARN] inst {code}: {e}")
-        return code, {"foreign_days": 0, "trust_days": 0}
+        print(f"[WARN] T86 {date_str}: {e}")
+        return date_str, {}
+
+
+def get_all_inst_data():
+    """
+    從 TWSE T86 抓取近 30 個工作日的三大法人資料，
+    計算每檔股票外資 / 投信的「連續淨買超天數」。
+    回傳 {code: {"foreign_days": N, "trust_days": N}}
+    """
+    cached = get_cache("inst_all")
+    if cached:
+        return cached
+
+    dates = recent_weekdays(30)
+
+    all_days = {}  # {date_str: {code: (f_net, t_net)}}
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_fetch_t86_day, d): d for d in dates}
+        for future in as_completed(futures, timeout=90):
+            date_str, day_data = future.result()
+            if day_data:
+                all_days[date_str] = day_data
+
+    sorted_dates = sorted(all_days.keys(), reverse=True)
+
+    # 收集所有股票代號
+    all_codes = set()
+    for day in all_days.values():
+        all_codes.update(day.keys())
+
+    result = {}
+    for code in all_codes:
+        f_count = 0
+        t_count = 0
+
+        # 外資連續淨買超天數
+        for date in sorted_dates:
+            day = all_days.get(date, {})
+            if code not in day:
+                continue          # 當日可能停牌，跳過不中斷
+            f_net, _ = day[code]
+            if f_net > 0:
+                f_count += 1
+            else:
+                break
+
+        # 投信連續淨買超天數
+        for date in sorted_dates:
+            day = all_days.get(date, {})
+            if code not in day:
+                continue
+            _, t_net = day[code]
+            if t_net > 0:
+                t_count += 1
+            else:
+                break
+
+        result[code] = {"foreign_days": f_count, "trust_days": t_count}
+
+    set_cache("inst_all", result)
+    return result
 
 
 @app.route("/quote")
 def quote():
     try:
-        start_30 = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-
         top100, price_data, latest_date, names = get_top100_prices()
         if not top100:
             return jsonify({
@@ -209,17 +280,12 @@ def quote():
                 "error": "TWSE 目前無資料，請查看 /debug-twse 了解原因"
             })
 
-        inst_results = {}
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = {executor.submit(fetch_inst_one, code, start_30): code
-                       for code in top100}
-            for future in as_completed(futures, timeout=90):
-                code, inst = future.result()
-                inst_results[code] = inst
+        inst_all = get_all_inst_data()
 
         result = {}
         for code in top100:
-            p = price_data[code]
+            p    = price_data[code]
+            inst = inst_all.get(code, {"foreign_days": 0, "trust_days": 0})
             result[code] = {
                 "code":         code,
                 "name":         names.get(code, code),
@@ -227,8 +293,8 @@ def quote():
                 "price":        p["price"],
                 "change":       p["change"],
                 "volume":       p["volume"],
-                "foreign_days": inst_results.get(code, {}).get("foreign_days", 0),
-                "trust_days":   inst_results.get(code, {}).get("trust_days", 0),
+                "foreign_days": inst["foreign_days"],
+                "trust_days":   inst["trust_days"],
                 "error":        False,
             }
 
@@ -265,6 +331,30 @@ def debug_twse():
                 })
             except Exception as e:
                 results.append({"url": url, "date_param": date_str, "error": str(e)})
+    return jsonify(results)
+
+
+@app.route("/debug-t86")
+def debug_t86():
+    """偵錯：顯示 TWSE T86 三大法人 API 的原始回應"""
+    results = []
+    for date_str in recent_weekdays(3):
+        url = "https://www.twse.com.tw/rwd/zh/fund/T86"
+        try:
+            r = req.get(url,
+                        params={"response": "json", "date": date_str, "selectType": "ALL"},
+                        headers=TWSE_HEADERS, timeout=20, verify=False)
+            resp = r.json()
+            rows = resp.get("data", [])
+            results.append({
+                "date_param": date_str,
+                "stat": resp.get("stat", "?"),
+                "fields": resp.get("fields", []),
+                "row_count": len(rows),
+                "sample": rows[:3] if rows else [],
+            })
+        except Exception as e:
+            results.append({"date_param": date_str, "error": str(e)})
     return jsonify(results)
 
 
