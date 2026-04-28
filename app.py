@@ -47,14 +47,14 @@ def to_int(val):
 
 
 def parse_twse_date(raw):
-    """民國日期 1150425 → 2026/04/25"""
+    """解析 TWSE 日期格式：西元8碼 20260425 → 2026/04/25，民國7碼 1150425 → 2026/04/25"""
     try:
         raw = str(raw).strip()
-        if len(raw) == 7:
-            year  = int(raw[:3]) + 1911
-            month = raw[3:5]
-            day   = raw[5:7]
-            return f"{year}/{month}/{day}"
+        if len(raw) == 8:  # 西元格式 YYYYMMDD
+            return f"{raw[:4]}/{raw[4:6]}/{raw[6:8]}"
+        if len(raw) == 7:  # 民國格式 YYYMMDD
+            year = int(raw[:3]) + 1911
+            return f"{year}/{raw[3:5]}/{raw[5:7]}"
     except Exception:
         pass
     return raw
@@ -133,29 +133,27 @@ def get_top100_prices():
 
     for row in rows:
         try:
-            # [代號, 名稱, 成交股數, 成交金額, 開盤, 最高, 最低, 收盤, 漲跌符號, 漲跌價差, 本益比]
+            # 實際欄位（10欄）: [代號, 名稱, 成交股數, 成交金額, 開盤, 最高, 最低, 收盤, 漲跌(含符號如+3.05), 本益比]
             code    = str(row[0]).strip()
             name    = str(row[1]).strip()
             close_s = str(row[7]).replace(",", "").strip()
-            if close_s in ("--", "", "除權息", "除息", "除權"):
+            if close_s in ("--", "", "除權息", "除息", "除權", "X"):
                 continue
             close = float(close_s)
             if close <= 0:
                 continue
 
             vol_s = str(row[2]).replace(",", "").strip()
-            vol   = int(vol_s) if vol_s not in ("--", "") else 0
+            vol   = int(vol_s) if vol_s not in ("--", "", "X") else 0
 
-            diff_s = str(row[9]).replace(",", "").strip()
-            sign   = str(row[8]).strip()
-            diff   = float(diff_s) if diff_s not in ("--", "") else 0
-            if sign == "-":
-                diff = -diff
+            # row[8] 是漲跌（含符號），如 "+3.05" 或 "-1.23" 或 "0.00"
+            chg_s  = str(row[8]).replace(",", "").strip()
+            diff   = float(chg_s) if chg_s not in ("--", "", "X", "除權息", "除息", "除權") else 0
             prev   = close - diff
             change = round(diff / prev * 100, 2) if prev > 0 else 0
 
             tv_s     = str(row[3]).replace(",", "").strip()
-            turnover = int(tv_s) if tv_s not in ("--", "") else 0
+            turnover = int(tv_s) if tv_s not in ("--", "", "X") else 0
 
             names[code] = name
             latest_prices[code] = {
