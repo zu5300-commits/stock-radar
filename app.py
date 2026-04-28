@@ -515,6 +515,33 @@ def quote():
         return jsonify({"ok": False, "error": str(e)})
 
 
+@app.route("/debug-inst")
+def debug_inst():
+    """檢查指定代號在快取裡的法人天數，及它是否在 price_data 裡"""
+    codes_to_check = request.args.get("codes", "00763U,00740B").split(",")
+    top100, price_data, latest_date, names = get_top100_prices()
+    inst_all  = get_cache("inst_all")
+    inst_fast = get_cache("inst_fast")
+    result = {}
+    for code in codes_to_check:
+        code = code.strip()
+        result[code] = {
+            "in_price_data": code in price_data,
+            "price":         price_data.get(code, {}).get("price"),
+            "market":        price_data.get(code, {}).get("market"),
+            "inst_all":      inst_all.get(code)  if inst_all  else "cache_empty",
+            "inst_fast":     inst_fast.get(code) if inst_fast else "cache_empty",
+            "in_top100":     code in top100,
+        }
+    return jsonify({
+        "inst_all_exists":  inst_all  is not None,
+        "inst_fast_exists": inst_fast is not None,
+        "inst_all_size":    len(inst_all)  if inst_all  else 0,
+        "max_foreign_all":  max((v["foreign_days"] for v in inst_all.values()),  default=0) if inst_all  else 0,
+        "codes": result,
+    })
+
+
 @app.route("/debug-twse")
 def debug_twse():
     results = []
