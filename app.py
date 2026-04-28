@@ -385,7 +385,7 @@ def get_all_inst_data():
     if cached:
         return cached
 
-    dates = recent_weekdays(7)   # 7 個工作日足夠判斷連續 ≥3 天
+    dates = recent_weekdays(20)  # 20 個工作日，支援連續買超 ≥20 天篩選
     all_days = {}  # {date_str: {code: (f_net, t_net)}}
     _lock = threading.Lock()
 
@@ -397,7 +397,7 @@ def get_all_inst_data():
                 all_days[date_str].update(day_data)
 
     # TWSE 和 TPEX 各自獨立提交，完全並行
-    with ThreadPoolExecutor(max_workers=14) as executor:
+    with ThreadPoolExecutor(max_workers=20) as executor:
         twse_futs = {executor.submit(_fetch_t86_day, d): d for d in dates}
         tpex_futs = {executor.submit(_fetch_tpex_inst_day, d): d for d in dates}
         all_futs  = {**twse_futs, **tpex_futs}
