@@ -593,19 +593,21 @@ def debug_tpex_raw():
             raw = r.json()
             aa    = raw.get("aaData", [])
             tabs  = raw.get("tables", [])
-            tab0_keys = list(tabs[0].keys()) if tabs else []
-            tab0_aa   = tabs[0].get("aaData", []) if tabs else []
+            tab0_keys  = list(tabs[0].keys()) if tabs else []
+            tab0_aa    = tabs[0].get("aaData", []) if tabs else []
+            tab0_data  = tabs[0].get("data", [])   if tabs else []
             results.append({
                 "params": p,
                 "status": r.status_code,
                 "keys": list(raw.keys()),
                 "stat": raw.get("stat"),
-                "iTotalRecords": raw.get("iTotalRecords"),
                 "aaData_len": len(aa),
                 "tables_len": len(tabs),
                 "tables_t0_keys": tab0_keys,
                 "tables_t0_aaData_len": len(tab0_aa),
-                "sample": aa[0] if aa else (tab0_aa[0] if tab0_aa else []),
+                "tables_t0_data_len": len(tab0_data) if isinstance(tab0_data, list) else f"type:{type(tab0_data).__name__}",
+                "tables_t0_totalCount": tabs[0].get("totalCount") if tabs else None,
+                "sample": aa[0] if aa else (tab0_data[0] if isinstance(tab0_data, list) and tab0_data else []),
             })
         except Exception as e:
             results.append({"params": p, "error": str(e)})
