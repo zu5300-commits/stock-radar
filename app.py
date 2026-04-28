@@ -518,6 +518,54 @@ def debug_t86():
     return jsonify(results)
 
 
+@app.route("/debug-tpex-raw")
+def debug_tpex_raw():
+    """回傳 TPEX API 的原始 JSON（用於除錯結構）"""
+    roc = to_roc_date(recent_weekdays(3)[1])  # 前天
+    results = {}
+    # 行情
+    try:
+        r = req.get(
+            "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php",
+            params={"l": "zh-tw", "d": roc, "se": "EW", "s": "0,asc,0"},
+            headers=TPEX_HEADERS, timeout=20, verify=False)
+        raw = r.json()
+        tables = raw.get("tables", [])
+        aaData = raw.get("aaData", [])
+        results["price"] = {
+            "keys": list(raw.keys()),
+            "stat": raw.get("stat"),
+            "aaData_len": len(aaData),
+            "aaData_sample": aaData[:1] if aaData else [],
+            "tables_len": len(tables),
+            "tables_t0_keys": list(tables[0].keys()) if tables else [],
+            "tables_t0_sample": str(tables[0])[:500] if tables else "",
+        }
+    except Exception as e:
+        results["price"] = {"error": str(e)}
+    # 三大法人
+    try:
+        r = req.get(
+            "https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php",
+            params={"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc},
+            headers=TPEX_HEADERS, timeout=20, verify=False)
+        raw = r.json()
+        tables = raw.get("tables", [])
+        aaData = raw.get("aaData", [])
+        results["inst"] = {
+            "keys": list(raw.keys()),
+            "stat": raw.get("stat"),
+            "aaData_len": len(aaData),
+            "aaData_sample": aaData[:1] if aaData else [],
+            "tables_len": len(tables),
+            "tables_t0_keys": list(tables[0].keys()) if tables else [],
+            "tables_t0_sample": str(tables[0])[:500] if tables else "",
+        }
+    except Exception as e:
+        results["inst"] = {"error": str(e)}
+    return jsonify({"roc": roc, "results": results})
+
+
 @app.route("/health")
 def health():
     return jsonify({"ok": True})
