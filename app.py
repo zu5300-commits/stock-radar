@@ -375,66 +375,95 @@ def _fetch_tpex_inst_day(date_str):
         return date_str, {}
 
 
-def get_all_inst_data():
-    """
-    合併 TWSE T86 + TPEX 三大法人，計算每股連續淨買超天數。
-    TWSE 和 TPEX 的每日任務完全並行，加速回應。
-    回傳 {code: {"foreign_days": N, "trust_days": N}}
-    """
-    cached = get_cache("inst_all")
-    if cached:
-        return cached
+_inst_bg_lock  = threading.Lock()
+_inst_bg_running = False
 
-    dates = recent_weekdays(20)  # 20 個工作日，支援連續買超 ≥20 天篩選
-    all_days = {}  # {date_str: {code: (f_net, t_net)}}
-    _lock = threading.Lock()
+
+def _compute_inst(n_days):
+    """抓 n_days 個工作日的三大法人資料，回傳 {code: {foreign_days, trust_days}}"""
+    dates    = recent_weekdays(n_days)
+    all_days = {}
+    _lock    = threading.Lock()
 
     def _merge(date_str, day_data):
         if day_data:
             with _lock:
-                if date_str not in all_days:
-                    all_days[date_str] = {}
-                all_days[date_str].update(day_data)
+                all_days.setdefault(date_str, {}).update(day_data)
 
-    # TWSE 和 TPEX 各自獨立提交，完全並行
     with ThreadPoolExecutor(max_workers=20) as executor:
         twse_futs = {executor.submit(_fetch_t86_day, d): d for d in dates}
         tpex_futs = {executor.submit(_fetch_tpex_inst_day, d): d for d in dates}
-        all_futs  = {**twse_futs, **tpex_futs}
-        for future in as_completed(all_futs, timeout=50):
-            date_str, day_data = future.result()
-            _merge(date_str, day_data)
+        for future in as_completed({**twse_futs, **tpex_futs}, timeout=50):
+            try:
+                date_str, day_data = future.result()
+                _merge(date_str, day_data)
+            except Exception:
+                pass
 
     sorted_dates = sorted(all_days.keys(), reverse=True)
-
-    all_codes = set()
-    for day in all_days.values():
-        all_codes.update(day.keys())
-
+    all_codes    = set(c for d in all_days.values() for c in d)
     result = {}
     for code in all_codes:
-        f_count = 0
-        t_count = 0
+        f_count = t_count = 0
         for date in sorted_dates:
             day = all_days.get(date, {})
-            if code not in day:
-                continue
-            if day[code][0] > 0:
-                f_count += 1
-            else:
-                break
+            if code not in day: continue
+            if day[code][0] > 0: f_count += 1
+            else: break
         for date in sorted_dates:
             day = all_days.get(date, {})
-            if code not in day:
-                continue
-            if day[code][1] > 0:
-                t_count += 1
-            else:
-                break
+            if code not in day: continue
+            if day[code][1] > 0: t_count += 1
+            else: break
         result[code] = {"foreign_days": f_count, "trust_days": t_count}
-
-    set_cache("inst_all", result)
     return result
+
+
+def _start_bg_inst_fetch():
+    """如果沒有在跑，啟動背景 thread 抓 20 天法人資料"""
+    global _inst_bg_running
+    with _inst_bg_lock:
+        if _inst_bg_running:
+            return
+        _inst_bg_running = True
+
+    def _bg():
+        global _inst_bg_running
+        try:
+            result = _compute_inst(20)
+            set_cache("inst_all", result)
+            print(f"[BG] 20-day inst fetch done, {len(result)} stocks")
+        except Exception as e:
+            print(f"[BG] inst fetch error: {e}")
+        finally:
+            with _inst_bg_lock:
+                _inst_bg_running = False
+
+    threading.Thread(target=_bg, daemon=True).start()
+    print("[BG] 20-day inst background fetch started")
+
+
+def get_all_inst_data():
+    """
+    回傳三大法人連續買超天數。
+    - 有 20 天快取 → 直接用（≥20 天篩選準確）
+    - 沒有 → 同步抓 7 天（快速，確保 /quote 不超時），
+              並在背景抓 20 天（下次請求時即可使用）
+    """
+    # 20 天完整資料優先
+    cached = get_cache("inst_all")
+    if cached:
+        return cached
+
+    # 7 天快速資料（同步，不超時）
+    fast = get_cache("inst_fast")
+    if not fast:
+        fast = _compute_inst(7)
+        set_cache("inst_fast", fast)
+
+    # 背景補齊 20 天
+    _start_bg_inst_fetch()
+    return fast
 
 
 # ── API 路由 ──────────────────────────────────────────────────────────────────
