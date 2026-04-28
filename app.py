@@ -541,50 +541,59 @@ def debug_t86():
 
 @app.route("/debug-tpex-raw")
 def debug_tpex_raw():
-    """回傳 TPEX API 的原始 JSON（用於除錯結構）"""
-    roc = to_roc_date(recent_weekdays(3)[1])  # 前天
-    results = {}
-    # 行情
-    try:
-        r = req.get(
-            "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php",
-            params={"l": "zh-tw", "d": roc, "se": "EW", "s": "0,asc,0"},
-            headers=TPEX_HEADERS, timeout=20, verify=False)
-        raw = r.json()
-        tables = raw.get("tables", [])
-        aaData = raw.get("aaData", [])
-        results["price"] = {
-            "keys": list(raw.keys()),
-            "stat": raw.get("stat"),
-            "aaData_len": len(aaData),
-            "aaData_sample": aaData[:1] if aaData else [],
-            "tables_len": len(tables),
-            "tables_t0_keys": list(tables[0].keys()) if tables else [],
-            "tables_t0_sample": str(tables[0])[:500] if tables else "",
-        }
-    except Exception as e:
-        results["price"] = {"error": str(e)}
-    # 三大法人
-    try:
-        r = req.get(
-            "https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php",
-            params={"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc},
-            headers=TPEX_HEADERS, timeout=20, verify=False)
-        raw = r.json()
-        tables = raw.get("tables", [])
-        aaData = raw.get("aaData", [])
-        results["inst"] = {
-            "keys": list(raw.keys()),
-            "stat": raw.get("stat"),
-            "aaData_len": len(aaData),
-            "aaData_sample": aaData[:1] if aaData else [],
-            "tables_len": len(tables),
-            "tables_t0_keys": list(tables[0].keys()) if tables else [],
-            "tables_t0_sample": str(tables[0])[:500] if tables else "",
-        }
-    except Exception as e:
-        results["inst"] = {"error": str(e)}
-    return jsonify({"roc": roc, "results": results})
+    """測試 TPEX 法人 API 各種參數組合，找出哪個真的回傳資料"""
+    dates = recent_weekdays(3)
+    date_str = dates[1]  # 前一個工作日
+    roc_slash = to_roc_date(date_str)          # 115/04/28
+    roc_plain = roc_slash.replace("/", "")     # 1150428
+    results = []
+
+    inst_url = ("https://www.tpex.org.tw/web/stock/3insti/daily_trade/"
+                "3itrade_hedge_result.php")
+
+    # 測試多種參數組合
+    combos = [
+        {"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc_slash},
+        {"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc_plain},
+        {"l": "zh-tw", "o": "json", "se": "EW",            "d": roc_slash},
+        {"l": "zh-tw", "o": "json",               "t": "D", "d": roc_slash},
+        {"l": "zh-tw", "o": "json", "se": "AL", "t": "D", "d": roc_slash},
+    ]
+    for p in combos:
+        try:
+            r = req.get(inst_url, params=p, headers=TPEX_HEADERS,
+                        timeout=15, verify=False)
+            raw = r.json()
+            aa = raw.get("aaData", [])
+            results.append({
+                "params": p,
+                "status": r.status_code,
+                "keys": list(raw.keys()),
+                "aaData_len": len(aa),
+                "sample": aa[0] if aa else [],
+            })
+        except Exception as e:
+            results.append({"params": p, "error": str(e)})
+
+    # 也試試 OpenAPI institution 端點
+    oa_urls = [
+        f"https://www.tpex.org.tw/openapi/v1/tpex_mainboard_institution_buy_sell_total?date={date_str}&l=zh-tw",
+        f"https://www.tpex.org.tw/openapi/v1/tpex_mainboard_3investors_trade?date={date_str}&l=zh-tw",
+    ]
+    for u in oa_urls:
+        try:
+            r = req.get(u, headers=TPEX_HEADERS, timeout=15, verify=False)
+            body = r.text[:300]
+            try:
+                parsed = r.json()
+                body = f"JSON len={len(parsed) if isinstance(parsed, list) else 'dict'}"
+            except Exception:
+                pass
+            results.append({"url": u, "status": r.status_code, "body_preview": body})
+        except Exception as e:
+            results.append({"url": u, "error": str(e)})
+
+    return jsonify({"date_str": date_str, "roc_slash": roc_slash, "results": results})
 
 
 @app.route("/health")
