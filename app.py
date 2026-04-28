@@ -192,10 +192,12 @@ def _parse_tpex_prices(rows):
             prev  = close - diff
             change = round(diff / prev * 100, 2) if prev > 0 else 0
 
-            vol_s = str(row.get("TradeVolume", "0")).replace(",", "").strip()
-            vol   = int(vol_s) if vol_s not in ("--", "") else 0
+            # TradingShares (股) ÷ 1000 = 張數
+            vol_s = str(row.get("TradingShares", row.get("TradeVolume", "0"))).replace(",", "").strip()
+            vol   = int(vol_s) // 1000 if vol_s not in ("--", "") else 0
 
-            tv_s     = str(row.get("TradeValue", "0")).replace(",", "").strip()
+            # TransactionAmount = 成交金額（NTD），用於排行
+            tv_s     = str(row.get("TransactionAmount", row.get("TradeValue", "0"))).replace(",", "").strip()
             turnover = int(tv_s) if tv_s not in ("--", "") else 0
 
             names[code] = name
@@ -304,50 +306,48 @@ def _fetch_t86_day(date_str):
 
 def _fetch_tpex_inst_day(date_str):
     """
-    TPEX 三大法人（上櫃）— 使用 OpenAPI v1。
+    TPEX 三大法人（上櫃）— 使用 aaData 格式（較穩定）。
     回傳 (date_str, {code: (foreign_net, trust_net)})
-    常見欄位: SecurityCode, ForeignNetBuyShares / InvestmentTrustNetBuyShares
-              (或 ForeignInvestorNetBuy / InvestmentTrustNetBuy)
+
+    aaData 欄位對照（TPEX 比 TWSE 多一欄「外資合計」，所以 t_idx=13）:
+      [0]=代號 [1]=名稱
+      [2-4]=外資(不含自營商) buy/sell/net  ← f_net = [4]
+      [5-7]=外資自營商 buy/sell/net
+      [8-10]=外資合計 buy/sell/net
+      [11-13]=投信 buy/sell/net            ← t_net = [13]
+      [14-16]=自營商(自行) buy/sell/net
+      [17-19]=自營商(避險) buy/sell/net
+      [20-22]=自營商合計 buy/sell/net
+      [23]=三大法人合計
     """
-    url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_institution_buy_sell_total"
+    roc = to_roc_date(date_str)
+    url = ("https://www.tpex.org.tw/web/stock/3insti/daily_trade/"
+           "3itrade_hedge_result.php")
     try:
-        r = req.get(url, params={"date": date_str, "l": "zh-tw"},
+        r = req.get(url,
+                    params={"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc},
                     headers=TPEX_HEADERS, timeout=30, verify=False)
-        rows = r.json()
-        print(f"[T86-TPEX-OA] {date_str} rows={len(rows) if isinstance(rows,list) else 'N/A'}")
-        if not isinstance(rows, list) or not rows:
-            return date_str, {}
-
-        # 動態偵測欄位名稱（不同版本 API 欄位名可能不同）
-        sample = rows[0]
-        code_key = next((k for k in sample if "code" in k.lower() or "Code" in k), None)
-        f_key    = next((k for k in sample if "Foreign" in k and "Net" in k and "Share" in k), None)
-        t_key    = next((k for k in sample if "Investment" in k and "Net" in k and "Share" in k), None)
-        if not f_key:
-            f_key = next((k for k in sample if "Foreign" in k and ("Net" in k or "net" in k)), None)
-        if not t_key:
-            t_key = next((k for k in sample if ("Trust" in k or "Investment" in k) and ("Net" in k or "net" in k)), None)
-        print(f"[T86-TPEX-OA] keys detected: code={code_key} f={f_key} t={t_key}")
-        print(f"[T86-TPEX-OA] sample keys: {list(sample.keys())}")
-
-        if not code_key:
+        resp = r.json()
+        rows = resp.get("aaData", [])
+        print(f"[T86-TPEX] {date_str} roc={roc} rows={len(rows)}")
+        if not rows:
             return date_str, {}
 
         day = {}
         for row in rows:
             try:
-                code  = str(row.get(code_key, "")).strip()
+                code = str(row[0]).strip()
                 if not code or not code[0].isdigit():
                     continue
-                f_net = to_int(row.get(f_key, 0)) if f_key else 0
-                t_net = to_int(row.get(t_key, 0)) if t_key else 0
+                f_net = to_int(row[4])   # 外資及陸資(不含外資自營商)買賣超
+                t_net = to_int(row[13])  # 投信買賣超（TPEX 多一個外資合計群，所以是13）
                 day[code] = (f_net, t_net)
-            except Exception:
+            except (IndexError, Exception):
                 continue
         return date_str, day
 
     except Exception as e:
-        print(f"[WARN] T86-TPEX-OA {date_str}: {e}")
+        print(f"[WARN] T86-TPEX {date_str}: {e}")
         return date_str, {}
 
 
@@ -493,21 +493,23 @@ def debug_t86():
         except Exception as e:
             results.append({"source": "TWSE-T86", "date": date_str, "error": str(e)})
 
-        # TPEX 三大法人 (OpenAPI)
-        url2 = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_institution_buy_sell_total"
+        # TPEX 三大法人 (aaData)
+        roc = to_roc_date(date_str)
+        url2 = ("https://www.tpex.org.tw/web/stock/3insti/daily_trade/"
+                "3itrade_hedge_result.php")
         try:
-            r = req.get(url2, params={"date": date_str, "l": "zh-tw"},
+            r = req.get(url2,
+                        params={"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc},
                         headers=TPEX_HEADERS, timeout=20, verify=False)
-            rows = r.json()
-            sample_keys = list(rows[0].keys()) if isinstance(rows, list) and rows else []
+            rows = r.json().get("aaData", [])
             results.append({
-                "source": "TPEX-inst-OA", "date": date_str,
-                "row_count": len(rows) if isinstance(rows, list) else 0,
-                "sample_keys": sample_keys,
-                "sample": rows[:2] if isinstance(rows, list) else rows,
+                "source": "TPEX-inst", "date": date_str, "roc": roc,
+                "row_count": len(rows),
+                "col_count": len(rows[0]) if rows else 0,
+                "sample": rows[:2] if rows else [],
             })
         except Exception as e:
-            results.append({"source": "TPEX-inst-OA", "date": date_str, "error": str(e)})
+            results.append({"source": "TPEX-inst", "date": date_str, "error": str(e)})
 
         # TPEX 行情 (OpenAPI)
         url3 = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
