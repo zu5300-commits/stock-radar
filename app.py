@@ -220,19 +220,26 @@ def get_top100_prices():
     if cached:
         return cached
 
-    # 1. 上市
-    twse_found = None
-    for date_str in recent_weekdays(7):
-        twse_found = fetch_twse_day(date_str)
-        if twse_found:
-            break
+    # TWSE 和 TPEX 並行抓取
+    def _try_twse():
+        for d in recent_weekdays(7):
+            r = fetch_twse_day(d)
+            if r:
+                return r
+        return None
 
-    # 2. 上櫃
-    tpex_found = None
-    for date_str in recent_weekdays(7):
-        tpex_found = fetch_tpex_day(date_str)
-        if tpex_found:
-            break
+    def _try_tpex():
+        for d in recent_weekdays(7):
+            r = fetch_tpex_day(d)
+            if r:
+                return r
+        return None
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f_twse = ex.submit(_try_twse)
+        f_tpex = ex.submit(_try_tpex)
+        twse_found = f_twse.result(timeout=40)
+        tpex_found = f_tpex.result(timeout=40)
 
     all_names  = {}
     all_prices = {}
@@ -354,29 +361,32 @@ def _fetch_tpex_inst_day(date_str):
 def get_all_inst_data():
     """
     合併 TWSE T86 + TPEX 三大法人，計算每股連續淨買超天數。
+    TWSE 和 TPEX 的每日任務完全並行，加速回應。
     回傳 {code: {"foreign_days": N, "trust_days": N}}
     """
     cached = get_cache("inst_all")
     if cached:
         return cached
 
-    dates = recent_weekdays(30)
+    dates = recent_weekdays(22)  # 22 個工作日 ≈ 1 個月
     all_days = {}  # {date_str: {code: (f_net, t_net)}}
+    _lock = threading.Lock()
 
-    def _fetch_both(date_str):
-        _, twse_day = _fetch_t86_day(date_str)
-        _, tpex_day = _fetch_tpex_inst_day(date_str)
-        merged = {}
-        merged.update(twse_day)
-        merged.update(tpex_day)
-        return date_str, merged
+    def _merge(date_str, day_data):
+        if day_data:
+            with _lock:
+                if date_str not in all_days:
+                    all_days[date_str] = {}
+                all_days[date_str].update(day_data)
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(_fetch_both, d): d for d in dates}
-        for future in as_completed(futures, timeout=120):
+    # TWSE 和 TPEX 各自獨立提交，完全並行
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        twse_futs = {executor.submit(_fetch_t86_day, d): d for d in dates}
+        tpex_futs = {executor.submit(_fetch_tpex_inst_day, d): d for d in dates}
+        all_futs  = {**twse_futs, **tpex_futs}
+        for future in as_completed(all_futs, timeout=80):
             date_str, day_data = future.result()
-            if day_data:
-                all_days[date_str] = day_data
+            _merge(date_str, day_data)
 
     sorted_dates = sorted(all_days.keys(), reverse=True)
 
