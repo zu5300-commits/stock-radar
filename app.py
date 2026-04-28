@@ -313,19 +313,17 @@ def _fetch_t86_day(date_str):
 
 def _fetch_tpex_inst_day(date_str):
     """
-    TPEX 三大法人（上櫃）— 使用 aaData 格式（較穩定）。
+    TPEX 三大法人（上櫃）— 使用 3itrade_hedge_result.php。
     回傳 (date_str, {code: (foreign_net, trust_net)})
 
-    aaData 欄位對照（TPEX 比 TWSE 多一欄「外資合計」，所以 t_idx=13）:
+    新版 API 資料在 tables[0]["data"]（舊版在頂層 aaData）。
+    欄位索引（25欄，比 TWSE 多一欄「外資合計」）:
       [0]=代號 [1]=名稱
       [2-4]=外資(不含自營商) buy/sell/net  ← f_net = [4]
       [5-7]=外資自營商 buy/sell/net
       [8-10]=外資合計 buy/sell/net
       [11-13]=投信 buy/sell/net            ← t_net = [13]
-      [14-16]=自營商(自行) buy/sell/net
-      [17-19]=自營商(避險) buy/sell/net
-      [20-22]=自營商合計 buy/sell/net
-      [23]=三大法人合計
+      其餘=自營商各項
     """
     roc = to_roc_date(date_str)
     url = ("https://www.tpex.org.tw/web/stock/3insti/daily_trade/"
@@ -335,10 +333,29 @@ def _fetch_tpex_inst_day(date_str):
                     params={"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc},
                     headers=TPEX_HEADERS, timeout=30, verify=False)
         resp = r.json()
+
+        # 新版：tables[0]["data"]；舊版：頂層 aaData（向下相容）
         rows = resp.get("aaData", [])
+        if not rows:
+            tables = resp.get("tables", [])
+            if tables:
+                rows = tables[0].get("data", [])
+
         print(f"[T86-TPEX] {date_str} roc={roc} rows={len(rows)}")
         if not rows:
             return date_str, {}
+
+        # 自動偵測外資/投信欄位索引
+        fields = []
+        tables = resp.get("tables", [])
+        if tables:
+            fields = tables[0].get("fields", [])
+        f_idx, t_idx = 4, 13  # TPEX 預設
+        for i, f in enumerate(fields):
+            if "外" in f and "買賣超" in f and "自營" not in f and "合計" not in f and i < 8:
+                f_idx = i
+            if "投信" in f and "買賣超" in f:
+                t_idx = i
 
         day = {}
         for row in rows:
@@ -346,8 +363,8 @@ def _fetch_tpex_inst_day(date_str):
                 code = str(row[0]).strip()
                 if not code or not code[0].isdigit():
                     continue
-                f_net = to_int(row[4])   # 外資及陸資(不含外資自營商)買賣超
-                t_net = to_int(row[13])  # 投信買賣超（TPEX 多一個外資合計群，所以是13）
+                f_net = to_int(row[f_idx])
+                t_net = to_int(row[t_idx])
                 day[code] = (f_net, t_net)
             except (IndexError, Exception):
                 continue
@@ -503,7 +520,7 @@ def debug_t86():
         except Exception as e:
             results.append({"source": "TWSE-T86", "date": date_str, "error": str(e)})
 
-        # TPEX 三大法人 (aaData)
+        # TPEX 三大法人 (tables[0]["data"] 新格式)
         roc = to_roc_date(date_str)
         url2 = ("https://www.tpex.org.tw/web/stock/3insti/daily_trade/"
                 "3itrade_hedge_result.php")
@@ -511,11 +528,21 @@ def debug_t86():
             r = req.get(url2,
                         params={"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc},
                         headers=TPEX_HEADERS, timeout=20, verify=False)
-            rows = r.json().get("aaData", [])
+            resp2 = r.json()
+            rows = resp2.get("aaData", [])
+            if not rows:
+                tabs = resp2.get("tables", [])
+                if tabs:
+                    rows = tabs[0].get("data", [])
+            fields2 = []
+            tabs2 = resp2.get("tables", [])
+            if tabs2:
+                fields2 = tabs2[0].get("fields", [])
             results.append({
                 "source": "TPEX-inst", "date": date_str, "roc": roc,
                 "row_count": len(rows),
                 "col_count": len(rows[0]) if rows else 0,
+                "fields": fields2,
                 "sample": rows[:2] if rows else [],
             })
         except Exception as e:
