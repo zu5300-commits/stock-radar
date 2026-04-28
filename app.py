@@ -480,8 +480,19 @@ def quote():
 
         inst_all = get_all_inst_data()
 
+        # 基本：成交值前 100
+        codes = list(top100)
+
+        # 補充：法人連續買超 ≥20 天，但不在前 100 的股票
+        # （price_data 已含全市場資料，不需額外 API call）
+        BUYUP_DAYS = 20
+        for code, inst in inst_all.items():
+            if (inst["foreign_days"] >= BUYUP_DAYS or inst["trust_days"] >= BUYUP_DAYS):
+                if code not in result and code in price_data and code not in codes:
+                    codes.append(code)
+
         result = {}
-        for code in top100:
+        for code in codes:
             p    = price_data[code]
             inst = inst_all.get(code, {"foreign_days": 0, "trust_days": 0})
             result[code] = {
