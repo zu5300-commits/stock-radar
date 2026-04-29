@@ -551,9 +551,11 @@ def _compute_rd_data(codes):
         print(f"[RD] TaiwanStockInfo: {e}")
 
     result = {}
+    # FinMind TaiwanStockFinancialStatements 無研發細項，改用 OperatingExpenses
+    # （營業費用 = 研發 + 銷售 + 管理），再用較低閾值過濾
     RD_TYPES = {
-        "ResearchAndDevelopmentExpenses",
-        "ResearchDevelopmentExpense",
+        "OperatingExpenses",          # 營業費用（FinMind 可用）
+        "ResearchAndDevelopmentExpenses",  # 若未來 FinMind 加入，自動生效
         "研究發展費用", "研究費用", "研究與發展費用",
     }
 

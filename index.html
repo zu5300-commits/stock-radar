@@ -235,7 +235,7 @@ const isWind  = s => s.change>0 && (s.foreign_days||0)>=3 && (s.trust_days||0)>=
 const isRD    = s => {
   const dr=s.debt_ratio, dy=s.div_yield, rr=s.rd_ratio;
   if(dr==null||dy==null||rr==null) return false;
-  return dr<50 && dy>1 && rr<15;
+  return dr<50 && dy>1 && rr<8;
 };
 const isBuyup = s => (s.foreign_days||0)>=20 || (s.trust_days||0)>=20;
 const metNow  = s => { const m=[]; if(isWind(s))m.push('wind'); if(isRD(s))m.push('rd'); if(isBuyup(s))m.push('buyup'); return m; };
