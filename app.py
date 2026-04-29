@@ -390,10 +390,11 @@ def _compute_inst(n_days):
             with _lock:
                 all_days.setdefault(date_str, {}).update(day_data)
 
-    with ThreadPoolExecutor(max_workers=20) as executor:
+    # workers=6：避免同時轟炸 TWSE/TPEX 被限速，分批送出確保資料完整
+    with ThreadPoolExecutor(max_workers=6) as executor:
         twse_futs = {executor.submit(_fetch_t86_day, d): d for d in dates}
         tpex_futs = {executor.submit(_fetch_tpex_inst_day, d): d for d in dates}
-        for future in as_completed({**twse_futs, **tpex_futs}, timeout=50):
+        for future in as_completed({**twse_futs, **tpex_futs}, timeout=120):
             try:
                 date_str, day_data = future.result()
                 _merge(date_str, day_data)
