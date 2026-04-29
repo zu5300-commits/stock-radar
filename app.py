@@ -49,8 +49,9 @@ def set_cache(key, data):
 
 
 def to_int(val):
+    """安全轉整數，支援浮點字串 '4829144000.0' → 4829144000"""
     try:
-        return int(str(val).replace(",", ""))
+        return int(float(str(val).replace(",", "")))
     except (ValueError, TypeError):
         return 0
 
