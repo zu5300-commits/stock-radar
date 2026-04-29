@@ -850,6 +850,35 @@ def debug_rd():
     })
 
 
+@app.route("/test-yahoo")
+def test_yahoo():
+    """從 Render server 測試 Yahoo Finance 財報資料（含 R&D）"""
+    results = {}
+    for symbol in ("4958.TW", "3035.TW", "3481.TW"):
+        url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+        try:
+            r = req.get(url,
+                params={"modules": "incomeStatementHistory"},
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+                timeout=15)
+            data = r.json()
+            stmts = (data.get("quoteSummary", {})
+                        .get("result", [{}])[0]
+                        .get("incomeStatementHistory", {})
+                        .get("incomeStatementHistory", []))
+            if stmts:
+                keys = list(stmts[0].keys())
+                rd_vals = [(s.get("endDate", {}).get("fmt", "?"),
+                            s.get("researchDevelopment", {}).get("raw"))
+                           for s in stmts]
+                results[symbol] = {"keys": keys, "rd_values": rd_vals, "count": len(stmts)}
+            else:
+                results[symbol] = {"error": "no statements", "raw": str(data)[:300]}
+        except Exception as e:
+            results[symbol] = {"error": str(e)}
+    return jsonify(results)
+
+
 @app.route("/debug-fm-datasets")
 def debug_fm_datasets():
     """查詢 FinMind 所有合法 Taiwan dataset 名稱 + 測試 R&D 相關 dataset"""
