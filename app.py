@@ -570,22 +570,24 @@ def _compute_rd_data(codes):
                 _, bs, fs = fut.result()
 
                 # ── 5年平均負債比 ─────────────────────────────────────────────
-                by_year = {}  # year → {assets, liab}
+                # FinMind BalanceSheet 有 TotalAssets(資產總額) + Equity(權益總額)
+                # 無獨立 TotalLiabilities；負債比 = (Assets-Equity)/Assets×100
+                by_year = {}  # year → {assets, equity}
                 for row in bs:
                     try:
                         year = str(row.get("date", ""))[:4]
                         typ  = str(row.get("type", ""))
                         val  = to_int(row.get("value", 0))
-                        if typ in ("TotalAssets", "資產總計"):
+                        if typ in ("TotalAssets", "資產總額", "資產總計"):
                             by_year.setdefault(year, {})["assets"] = val
-                        elif typ in ("TotalLiabilities", "負債總計"):
-                            by_year.setdefault(year, {})["liab"]   = val
+                        elif typ in ("Equity", "權益總額", "權益總計"):
+                            by_year.setdefault(year, {})["equity"] = val
                     except Exception:
                         continue
                 ratios = [
-                    d["liab"] / d["assets"] * 100
+                    (d["assets"] - d["equity"]) / d["assets"] * 100
                     for d in by_year.values()
-                    if d.get("assets", 0) > 0 and "liab" in d
+                    if d.get("assets", 0) > 0 and "equity" in d
                 ]
                 debt_ratio = round(sum(ratios) / len(ratios), 1) if ratios else None
 
@@ -754,6 +756,45 @@ def debug_inst():
         "max_foreign_all":  max((v["foreign_days"] for v in inst_all.values()),  default=0) if inst_all  else 0,
         "codes": result,
     })
+
+
+@app.route("/debug-mops")
+def debug_mops():
+    """查 MOPS ajax_t163sb04 原始 HTML 格式（前 3000 字）"""
+    now = datetime.now()
+    roc_year = now.year - 1911
+    # 目前季別
+    season = (now.month - 1) // 3  # 取「上一季」確保有資料
+    if season == 0:
+        season = 4
+        roc_year -= 1
+    url = "https://mops.twse.com.tw/mops/web/ajax_t163sb04"
+    results = {}
+    for typek in ("sii", "otc"):
+        try:
+            r = req.post(url, data={
+                "step": "1", "firstin": "1", "off": "1",
+                "keyword4": "", "code1": "", "TYPEK": typek,
+                "year": str(roc_year), "season": str(season),
+            }, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "Referer": "https://mops.twse.com.tw/",
+                "Content-Type": "application/x-www-form-urlencoded",
+            }, timeout=30, verify=False)
+            text = r.text
+            # 找含 4958 或 研究 的片段
+            idx = text.find("4958")
+            snippet = text[max(0,idx-100):idx+300] if idx >= 0 else text[:500]
+            results[typek] = {
+                "status": r.status_code,
+                "len": len(text),
+                "year_season": f"{roc_year}Q{season}",
+                "snippet_4958": snippet,
+                "first500": text[:500],
+            }
+        except Exception as e:
+            results[typek] = {"error": str(e)}
+    return jsonify(results)
 
 
 @app.route("/debug-rd")
