@@ -823,12 +823,30 @@ def debug_rd():
             "debt_ratio": rd.get("debt_ratio"),
             "div_yield":  bwibbu.get(code) if bwibbu else None,
         }
+
+    # ── 即時測試 FinMind 是否可從 Render 連線（只抓1筆）──────────────────────────
+    fm_test = {}
+    try:
+        test_rows = _fm_get("TaiwanStockBalanceSheet", "4958", "2024-01-01")
+        assets = [r for r in test_rows if r.get("type") in ("TotalAssets", "資產總額")]
+        equity = [r for r in test_rows if r.get("type") in ("Equity", "權益總額")]
+        fm_test = {
+            "ok":      len(test_rows) > 0,
+            "rows":    len(test_rows),
+            "assets":  assets[:1],
+            "equity":  equity[:1],
+        }
+    except Exception as e:
+        fm_test = {"ok": False, "error": str(e)}
+
     return jsonify({
-        "rd_cache_exists":   rd_data is not None,
-        "rd_cache_size":     len(rd_data) if rd_data else 0,
+        "rd_cache_exists":     rd_data is not None,
+        "rd_cache_size":       len(rd_data) if rd_data else 0,
+        "rd_bg_running":       _rd_bg_running,
         "bwibbu_cache_exists": bwibbu is not None,
         "bwibbu_cache_size":   len(bwibbu) if bwibbu else 0,
-        "codes": out,
+        "fm_test":             fm_test,
+        "codes":               out,
     })
 
 
