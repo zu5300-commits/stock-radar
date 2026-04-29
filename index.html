@@ -211,7 +211,7 @@ table.st tr:last-child td{border-bottom:none;}
 
 <div class="tbl-wrap">
 <table class="mt">
-  <thead><tr>
+  <thead><tr id="thead-row">
     <th>股票</th><th>現價</th><th>漲跌</th><th>成交量</th><th>外資連買</th><th>投信連買</th><th>策略</th><th>追蹤</th>
   </tr></thead>
   <tbody id="tbody"></tbody>
@@ -257,6 +257,15 @@ function starsHTML(n){return '<div class="stars">'+[1,2,3].map(i=>`<span class="
 function badgesHTML(met){return '<div class="bdgs">'+met.map(m=>`<span class="badge ${BM[m][0]}">${BM[m][1]}</span>`).join('')+'</div>';}
 function dotCls(t){return{entry:'d1',daily:'d1','wind-retrigger':'dw','wind-lost':'dl'}[t]||'dl';}
 function evCls(t){return{entry:'ev-entry','wind-retrigger':'ev-wr','wind-lost':'ev-wl'}[t]||'';}
+
+function autoAddSignal(code){
+  if(wl[code])return;
+  const s=liveData[code];if(!s||!s.price)return;
+  const met=metNow(s);if(!met.length)return;
+  const stratLabel=met.map(m=>BM[m][1]).join('+');
+  wl[code]={stars:1,windActive:isWind(s),windMissCount:0,windCycles:0,hasBuySignal:false,
+    snapshots:[{type:'entry',label:`📡 ${stratLabel} 觸發入選`,date:todayStr(),iso:nowISO(),price:s.price,stars:1,windCycle:0,met}]};
+}
 
 function addToWatch(code){
   if(wl[code])return;
@@ -375,6 +384,9 @@ async function manualFetch(){
     });
     showToast(`✅ 掃描完成：${ok}檔${fail>0?' / '+fail+'失敗':''}`,fail>0?'warn':'ok');
     processDailySnapshot();
+    // 自動把觸發任一策略的股票加入歷史紀錄
+    WATCH_CODES.forEach(item=>autoAddSignal(item.code));
+    lastFetch=nowISO();save();updateSchedUI();
   } catch(e){
     showToast('❌ 抓取失敗，請稍後再試','warn');
   }
@@ -401,6 +413,17 @@ function load(){try{const r=localStorage.getItem('radar_v9');if(r){const d=JSON.
 let curTab='wind',filterStrat=null,sortCol=null,sortDir=-1;
 const expandState={};
 function visibleList(){
+  if(curTab==='all'){
+    // ⭐ 全部 = 歷史紀錄：所有曾觸發策略的股票，依首次觸發日倒序
+    return Object.keys(wl).map(code=>{
+      const s=liveData[code]||WATCH_CODES.find(x=>x.code===code)||{code,name:code,price:0,change:0,sector:'—'};
+      return{...s,code};
+    }).sort((a,b)=>{
+      const ia=wl[a.code]?.snapshots?.[0]?.iso||'';
+      const ib=wl[b.code]?.snapshots?.[0]?.iso||'';
+      return ib.localeCompare(ia);
+    });
+  }
   const all=WATCH_CODES.map(c=>liveData[c.code]||{...c,price:0,change:0,volume:0,met:[]});
   let list=curTab==='wind'?all.filter(s=>isWind(s)):curTab==='rd'?all.filter(s=>isRD(s)):curTab==='buyup'?all.filter(s=>isBuyup(s)):all;
   if(filterStrat)list=list.filter(s=>(s.met||[]).includes(filterStrat));
@@ -444,26 +467,63 @@ function render(){
   const list=visibleList();
   document.getElementById('rc').textContent=list.length;
   const tbody=document.getElementById('tbody');
-  if(!list.length){
-    tbody.innerHTML=`<tr><td colspan="9"><div class="empty"><div class="empty-ic">📥</div>點「抓取行情」載入真實數據</div></td></tr>`;
+  const thead=document.getElementById('thead-row');
+
+  if(curTab==='all'){
+    // ⭐ 全部 tab：歷史信號紀錄，欄位不同
+    thead.innerHTML='<th>股票</th><th>現價/漲跌</th><th>觸發策略</th><th>⭐</th><th>首次觸發日</th><th>觸發股價→現價</th><th>移除</th>';
+    if(!list.length){
+      tbody.innerHTML=`<tr><td colspan="7"><div class="empty"><div class="empty-ic">📡</div>尚無策略觸發記錄，點「抓取行情」開始掃描</div></td></tr>`;
+    } else {
+      tbody.innerHTML=list.map(s=>{
+        const w=wl[s.code];if(!w)return'';
+        const hp=s.price>0;
+        const firstSnap=w.snapshots[0]||{};
+        const sigDate=firstSnap.date||'—';
+        const sigPrice=firstSnap.price||0;
+        const allMet=[...new Set(w.snapshots.flatMap(sn=>sn.met||[]))];
+        const pChg=sigPrice>0&&hp?pDiff(sigPrice,s.price):null;
+        return `<tr class="sr">
+          <td><div class="sname">${s.name||s.code}</div><div class="scode">${s.code}</div><div class="ssec">${s.sector||'—'}</div></td>
+          <td>
+            <div class="pv ${cc(s.change||0)}">${hp?fmtP(s.price):'—'}</div>
+            <div class="pv ${cc(s.change||0)}" style="font-size:12px">${hp?ps(s.change)+s.change.toFixed(2)+'%'+sg(s.change):'—'}</div>
+          </td>
+          <td>${badgesHTML(allMet)}</td>
+          <td>${starsHTML(w.stars)}</td>
+          <td class="dtc" style="font-size:12px;color:var(--txt3)">${sigDate}</td>
+          <td>
+            ${sigPrice>0?`<span class="pbig" style="font-size:13px">${fmtP(sigPrice)}</span>`:'—'}
+            ${pChg?'<br>'+chgTag(pChg):''}
+          </td>
+          <td><span class="wbtn on" onclick="removeFromWatch('${s.code}')" title="移除紀錄">✕</span></td>
+        </tr>`;
+      }).join('');
+    }
   } else {
-    tbody.innerHTML=list.map((s,i)=>{
-      const inW=!!wl[s.code];const cs=inW?wl[s.code].stars:0;const windNow=isWind(s);const w=wl[s.code];const buf=w?.windMissCount||0;
-      let wsHtml='';
-      if(inW){if(windNow)wsHtml=`<div class="ws ws-on">🌪️</div>`;else if(buf>0)wsHtml=`<div class="ws ws-buf">⏳${buf}/${WIND_BUFFER}</div>`;else wsHtml=`<div class="ws ws-off">⚫</div>`;}
-      const hp=s.price>0;
-      return `<tr class="sr">
-        <td><div class="sname">${s.name}</div><div class="scode">${s.code}</div><div class="ssec">${s.sector}</div>${wsHtml}</td>
-        <td><div class="pv ${cc(s.change)}">${hp?fmtP(s.price):'—'}</div></td>
-        <td><div class="pv ${cc(s.change)}" style="font-size:13px">${hp?ps(s.change)+s.change.toFixed(2)+'%'+sg(s.change):'—'}</div></td>
-        <td><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--txt2)">${hp?s.volume.toLocaleString()+'張':'—'}</span></td>
-        <td><span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:${(s.foreign_days||0)>=3?'var(--green)':'var(--txt2)'}">${hp?(s.foreign_days||0)+'天':'—'}</span></td>
-        <td><span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:${(s.trust_days||0)>=3?'var(--pink)':'var(--txt2)'}">${hp?(s.trust_days||0)+'天':'—'}</span></td>
-        <td>${inW?starsHTML(cs):'—'}</td>
-        <td>${badgesHTML(s.met||[])}</td>
-        <td><span class="wbtn ${inW?'on':'off'}" onclick="${inW?'removeFromWatch':'addToWatch'}('${s.code}')">${inW?'♥':'♡'}</span></td>
-      </tr>`;
-    }).join('');
+    // 風口/研發/買超 tab：原有欄位
+    thead.innerHTML='<th>股票</th><th>現價</th><th>漲跌</th><th>成交量</th><th>外資連買</th><th>投信連買</th><th>策略</th><th>追蹤</th>';
+    if(!list.length){
+      tbody.innerHTML=`<tr><td colspan="8"><div class="empty"><div class="empty-ic">📥</div>點「抓取行情」載入真實數據</div></td></tr>`;
+    } else {
+      tbody.innerHTML=list.map((s,i)=>{
+        const inW=!!wl[s.code];const cs=inW?wl[s.code].stars:0;const windNow=isWind(s);const w=wl[s.code];const buf=w?.windMissCount||0;
+        let wsHtml='';
+        if(inW){if(windNow)wsHtml=`<div class="ws ws-on">🌪️</div>`;else if(buf>0)wsHtml=`<div class="ws ws-buf">⏳${buf}/${WIND_BUFFER}</div>`;else wsHtml=`<div class="ws ws-off">⚫</div>`;}
+        const hp=s.price>0;
+        return `<tr class="sr">
+          <td><div class="sname">${s.name}</div><div class="scode">${s.code}</div><div class="ssec">${s.sector}</div>${wsHtml}</td>
+          <td><div class="pv ${cc(s.change)}">${hp?fmtP(s.price):'—'}</div></td>
+          <td><div class="pv ${cc(s.change)}" style="font-size:13px">${hp?ps(s.change)+s.change.toFixed(2)+'%'+sg(s.change):'—'}</div></td>
+          <td><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--txt2)">${hp?s.volume.toLocaleString()+'張':'—'}</span></td>
+          <td><span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:${(s.foreign_days||0)>=3?'var(--green)':'var(--txt2)'}">${hp?(s.foreign_days||0)+'天':'—'}</span></td>
+          <td><span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:${(s.trust_days||0)>=3?'var(--pink)':'var(--txt2)'}">${hp?(s.trust_days||0)+'天':'—'}</span></td>
+          <td>${inW?starsHTML(cs):'—'}</td>
+          <td>${badgesHTML(s.met||[])}</td>
+          <td><span class="wbtn ${inW?'on':'off'}" onclick="${inW?'removeFromWatch':'addToWatch'}('${s.code}')">${inW?'♥':'♡'}</span></td>
+        </tr>`;
+      }).join('');
+    }
   }
   const keys=Object.keys(wl);
   document.getElementById('wlcnt').textContent=keys.length;
