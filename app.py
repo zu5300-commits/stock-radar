@@ -12,6 +12,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 
+FM_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiV2luIiwiZW1haWwiOiJ6dTUzMDBAZ21haWwuY29tIn0.q5_lYazAnsTiNGKFdVNlIReL8Kq_FdwnkMd7IZKcPJI"
+FM_BASE  = "https://api.finmindtrade.com/api/v4/data"
+
 TWSE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -32,10 +35,10 @@ _cache = {}
 _cache_lock = threading.Lock()
 
 
-def get_cache(key):
+def get_cache(key, ttl=1800):
     with _cache_lock:
         entry = _cache.get(key)
-        if entry and (datetime.now() - entry["time"]).seconds < 1800:
+        if entry and (datetime.now() - entry["time"]).total_seconds() < ttl:
             return entry["data"]
     return None
 
@@ -459,6 +462,185 @@ def _start_bg_inst_fetch():
     print("[BG] 20-day inst background fetch started")
 
 
+# ── TWSE BWIBBU_ALL：殖利率 ───────────────────────────────────────────────────
+
+def fetch_bwibbu():
+    """取 TWSE 所有上市股票的殖利率（%）→ {code: float|None}"""
+    cached = get_cache("bwibbu")
+    if cached is not None:
+        return cached
+    url = "https://www.twse.com.tw/rwd/zh/afterTrading/BWIBBU_ALL"
+    result = {}
+    for d in recent_weekdays(5):
+        try:
+            r = req.get(url, params={"response": "json", "date": d},
+                        headers=TWSE_HEADERS, timeout=20, verify=False)
+            resp   = r.json()
+            rows   = resp.get("data", [])
+            fields = resp.get("fields", [])
+            if not rows:
+                continue
+            # 自動偵測殖利率欄位索引（預設 col=2）
+            y_idx = 2
+            for i, f in enumerate(fields):
+                if "殖利率" in f:
+                    y_idx = i
+                    break
+            for row in rows:
+                try:
+                    code  = str(row[0]).strip()
+                    val_s = str(row[y_idx]).replace(",", "").strip()
+                    result[code] = float(val_s) if val_s not in ("--", "", "N/A") else None
+                except Exception:
+                    continue
+            print(f"[BWIBBU] {d} → {len(result)} stocks")
+            break
+        except Exception as e:
+            print(f"[BWIBBU] {d}: {e}")
+    set_cache("bwibbu", result)
+    return result
+
+
+# ── FinMind 研發基本面 ─────────────────────────────────────────────────────────
+
+def _fm_get(dataset, data_id=None, start_date=None):
+    """FinMind API 單次呼叫，回傳 data list"""
+    params = {"dataset": dataset, "token": FM_TOKEN}
+    if data_id:
+        params["data_id"] = data_id
+    if start_date:
+        params["start_date"] = start_date
+    try:
+        r = req.get(FM_BASE, params=params, timeout=30)
+        resp = r.json()
+        if resp.get("status") == 200:
+            return resp.get("data", [])
+        print(f"[FM] {dataset}/{data_id} status={resp.get('status')} msg={resp.get('msg','')}")
+        return []
+    except Exception as e:
+        print(f"[FM] {dataset}/{data_id}: {e}")
+        return []
+
+
+_rd_bg_lock    = threading.Lock()
+_rd_bg_running = False
+
+
+def _compute_rd_data(codes):
+    """
+    對 codes 抓 FinMind:
+    - TaiwanStockBalanceSheet (5年) → 5年平均負債比
+    - TaiwanStockFinancialStatements (近5季) → 近4季研發費用合計
+    - TaiwanStockInfo → 流通股數（計算市值）
+    回傳 {code: {debt_ratio, rd_expense, shares}}
+    """
+    now      = datetime.now()
+    start_5y = (now - timedelta(days=365 * 5 + 60)).strftime("%Y-%m-%d")
+    start_5q = (now - timedelta(days=420)).strftime("%Y-%m-%d")
+
+    # ① 一次取全部股票基本資訊（流通股數）
+    shares_map = {}
+    try:
+        for row in _fm_get("TaiwanStockInfo"):
+            code   = str(row.get("stock_id", "")).strip()
+            shares = to_int(row.get("sharesissued", 0))
+            if code and shares > 0:
+                shares_map[code] = shares
+        print(f"[RD] TaiwanStockInfo: {len(shares_map)} stocks")
+    except Exception as e:
+        print(f"[RD] TaiwanStockInfo: {e}")
+
+    result = {}
+    RD_TYPES = {
+        "ResearchAndDevelopmentExpenses",
+        "ResearchDevelopmentExpense",
+        "研究發展費用", "研究費用", "研究與發展費用",
+    }
+
+    def _fetch_one(code):
+        bs = _fm_get("TaiwanStockBalanceSheet",        code, start_5y)
+        fs = _fm_get("TaiwanStockFinancialStatements", code, start_5q)
+        return code, bs, fs
+
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futs = {ex.submit(_fetch_one, c): c for c in codes}
+        for fut in as_completed(futs, timeout=360):
+            code = futs[fut]
+            try:
+                _, bs, fs = fut.result()
+
+                # ── 5年平均負債比 ─────────────────────────────────────────────
+                by_year = {}  # year → {assets, liab}
+                for row in bs:
+                    try:
+                        year = str(row.get("date", ""))[:4]
+                        typ  = str(row.get("type", ""))
+                        val  = to_int(row.get("value", 0))
+                        if typ in ("TotalAssets", "資產總計"):
+                            by_year.setdefault(year, {})["assets"] = val
+                        elif typ in ("TotalLiabilities", "負債總計"):
+                            by_year.setdefault(year, {})["liab"]   = val
+                    except Exception:
+                        continue
+                ratios = [
+                    d["liab"] / d["assets"] * 100
+                    for d in by_year.values()
+                    if d.get("assets", 0) > 0 and "liab" in d
+                ]
+                debt_ratio = round(sum(ratios) / len(ratios), 1) if ratios else None
+
+                # ── 近4季研發費用合計 ─────────────────────────────────────────
+                rd_rows = sorted(
+                    [r for r in fs if str(r.get("type", "")) in RD_TYPES],
+                    key=lambda r: r.get("date", ""),
+                    reverse=True
+                )[:4]
+                rd_expense = sum(to_int(r.get("value", 0)) for r in rd_rows)
+
+                result[code] = {
+                    "debt_ratio": debt_ratio,
+                    "rd_expense": rd_expense,
+                    "shares":     shares_map.get(code, 0),
+                }
+            except Exception as e:
+                print(f"[RD] {code}: {e}")
+
+    print(f"[RD] _compute_rd_data done: {len(result)} stocks")
+    return result
+
+
+def _start_bg_rd_fetch(codes):
+    global _rd_bg_running
+    with _rd_bg_lock:
+        if _rd_bg_running:
+            return
+        _rd_bg_running = True
+
+    def _bg():
+        global _rd_bg_running
+        try:
+            result = _compute_rd_data(codes)
+            set_cache("rd_data", result)
+            print(f"[BG] RD data done: {len(result)} stocks")
+        except Exception as e:
+            print(f"[BG] RD error: {e}")
+        finally:
+            with _rd_bg_lock:
+                _rd_bg_running = False
+
+    threading.Thread(target=_bg, daemon=True).start()
+    print("[BG] RD background fetch started")
+
+
+def get_rd_data(codes):
+    """回傳研發基本面快取（24h TTL），沒有就背景抓，先回空"""
+    cached = get_cache("rd_data", ttl=86400)
+    if cached is not None:
+        return cached
+    _start_bg_rd_fetch(codes)
+    return {}
+
+
 def get_all_inst_data():
     """
     回傳三大法人連續買超天數。
@@ -507,19 +689,35 @@ def quote():
                 if code in price_data and code not in codes:
                     codes.append(code)
 
+        # 研發基本面（背景抓，第一次為空不阻塞）
+        rd_data = get_rd_data(list(top100))
+        bwibbu  = fetch_bwibbu()
+
         result = {}
         for code in codes:
             p    = price_data[code]
             inst = inst_all.get(code, {"foreign_days": 0, "trust_days": 0})
+            rd   = rd_data.get(code, {})
+
+            # 計算市值/研發費用比
+            price    = p["price"]
+            shares   = rd.get("shares", 0)
+            rd_exp   = rd.get("rd_expense", 0)
+            mkt_cap  = price * shares                                   # 元
+            rd_ratio = round(mkt_cap / rd_exp, 1) if rd_exp > 0 and mkt_cap > 0 else None
+
             result[code] = {
                 "code":         code,
                 "name":         names.get(code, code),
                 "sector":       p.get("market", "—"),
-                "price":        p["price"],
+                "price":        price,
                 "change":       p["change"],
                 "volume":       p["volume"],
                 "foreign_days": inst["foreign_days"],
                 "trust_days":   inst["trust_days"],
+                "div_yield":    bwibbu.get(code),     # 殖利率（%）
+                "debt_ratio":   rd.get("debt_ratio"), # 負債比（%）
+                "rd_ratio":     rd_ratio,             # 市值/研發費用
                 "error":        False,
             }
 
@@ -555,6 +753,41 @@ def debug_inst():
         "inst_all_size":    len(inst_all)  if inst_all  else 0,
         "max_foreign_all":  max((v["foreign_days"] for v in inst_all.values()),  default=0) if inst_all  else 0,
         "codes": result,
+    })
+
+
+@app.route("/debug-rd")
+def debug_rd():
+    """檢查研發基本面快取；?codes=4958,2489 可指定標的"""
+    codes_to_check = request.args.get("codes", "4958,2489,3481,3035").split(",")
+    rd_data = get_cache("rd_data", ttl=86400)
+    bwibbu  = get_cache("bwibbu")
+    out = {}
+    top100, price_data, _, _ = get_top100_prices()
+    for code in codes_to_check:
+        code = code.strip()
+        rd   = (rd_data or {}).get(code, {})
+        p    = price_data.get(code, {})
+        price = p.get("price", 0)
+        shares   = rd.get("shares", 0)
+        rd_exp   = rd.get("rd_expense", 0)
+        mkt_cap  = price * shares
+        rd_ratio = round(mkt_cap / rd_exp, 1) if rd_exp > 0 and mkt_cap > 0 else None
+        out[code] = {
+            "price":      price,
+            "shares":     shares,
+            "mkt_cap_億": round(mkt_cap / 1e8, 1) if mkt_cap else None,
+            "rd_expense_億": round(rd_exp / 1e8, 1) if rd_exp else None,
+            "rd_ratio":   rd_ratio,
+            "debt_ratio": rd.get("debt_ratio"),
+            "div_yield":  bwibbu.get(code) if bwibbu else None,
+        }
+    return jsonify({
+        "rd_cache_exists":   rd_data is not None,
+        "rd_cache_size":     len(rd_data) if rd_data else 0,
+        "bwibbu_cache_exists": bwibbu is not None,
+        "bwibbu_cache_size":   len(bwibbu) if bwibbu else 0,
+        "codes": out,
     })
 
 
