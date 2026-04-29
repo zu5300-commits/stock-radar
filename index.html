@@ -152,6 +152,33 @@ table.st tr:last-child td{border-bottom:none;}
 .toast.buy{border-color:var(--pink);color:var(--pink);}
 .export-area{display:none;background:rgba(0,0,0,.3);border:1px solid var(--b2);border-radius:8px;padding:12px;margin-top:12px;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--txt3);white-space:pre;overflow-x:auto;line-height:1.7;}
 ::-webkit-scrollbar{width:4px;height:4px;}::-webkit-scrollbar-track{background:var(--bg);}::-webkit-scrollbar-thumb{background:var(--b2);border-radius:2px;}
+
+/* SYNC PANEL */
+.sync-panel{background:var(--surf);border:1px solid var(--b2);border-radius:12px;padding:12px 16px;margin:12px 0;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+.sync-label{font-size:10px;color:var(--txt2);letter-spacing:2px;text-transform:uppercase;white-space:nowrap;}
+.sync-code{font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:700;color:var(--accent);letter-spacing:3px;background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.2);border-radius:7px;padding:5px 12px;}
+.sync-hint{font-size:10px;color:var(--txt3);flex-basis:100%;margin-top:2px;}
+.btn-xs{padding:5px 11px;font-size:12px;border-radius:7px;border:none;cursor:pointer;font-weight:700;font-family:'Noto Sans TC',sans-serif;background:transparent;border:1px solid var(--b2);color:var(--txt3);}
+
+/* MOBILE RESPONSIVE */
+@media (max-width:640px){
+  .wrap{padding:10px 10px 80px;}
+  header{flex-direction:column;align-items:flex-start;gap:4px;}
+  .sched{flex-direction:column;gap:10px;align-items:flex-start;}
+  .countdown{font-size:16px;padding:6px 12px;}
+  .tabs{gap:4px;}
+  .tab{padding:6px 11px;font-size:12px;}
+  .topbar{flex-direction:column;align-items:flex-start;gap:6px;}
+  table.mt th{font-size:9px;padding:5px 5px;letter-spacing:.5px;}
+  .sr td{padding:8px 5px;font-size:12px;}
+  .pv{font-size:12px;}
+  .sname{font-size:12px;}
+  .scode,.ssec{font-size:9px;}
+  #wlgrid{grid-template-columns:1fr;}
+  .sync-panel{gap:8px;}
+  .sync-code{font-size:15px;letter-spacing:2px;}
+  .modal{padding:18px 14px;}
+}
 </style>
 </head>
 <body>
@@ -193,6 +220,14 @@ table.st tr:last-child td{border-bottom:none;}
     <button class="btn btn-g" onclick="doExport()">匯出</button>
     <button class="btn btn-g" onclick="clearAll()">清除</button>
   </div>
+</div>
+
+<div class="sync-panel">
+  <span class="sync-label">📱 同步碼</span>
+  <span class="sync-code" id="sync-code">——</span>
+  <button class="btn-xs" onclick="copySyncToken()">複製</button>
+  <button class="btn-xs" onclick="changeSyncToken()">換碼</button>
+  <div class="sync-hint">換裝置時輸入同一組代碼，資料自動同步（保持 App 開著即可）</div>
 </div>
 
 <div class="tabs">
@@ -449,8 +484,60 @@ function updateSchedUI(){
 }
 function tickCountdown(){const ms=msUntil19();document.getElementById('countdown').textContent=pad(Math.floor(ms/3600000))+':'+pad(Math.floor((ms%3600000)/60000))+':'+pad(Math.floor((ms%60000)/1000));}
 
-function save(){try{localStorage.setItem('radar_v9',JSON.stringify({wl,lastFetch}));}catch(e){}}
-function load(){try{const r=localStorage.getItem('radar_v9');if(r){const d=JSON.parse(r);wl=d.wl||{};lastFetch=d.lastFetch||null;}}catch(e){}}
+// ── 同步碼管理 ────────────────────────────────────────────────────
+function getSyncToken(){
+  let t=localStorage.getItem('radar_sync_token');
+  if(!t){t=crypto.randomUUID().slice(0,8);localStorage.setItem('radar_sync_token',t);}
+  return t;
+}
+const SYNC_TOKEN=getSyncToken();
+document.getElementById('sync-code').textContent=SYNC_TOKEN;
+
+function copySyncToken(){
+  navigator.clipboard.writeText(SYNC_TOKEN)
+    .then(()=>showToast('✅ 同步碼已複製：'+SYNC_TOKEN,'ok'))
+    .catch(()=>showToast('同步碼：'+SYNC_TOKEN,'info'));
+}
+function changeSyncToken(){
+  const t=prompt('輸入同步碼（可直接貼上另一台裝置的代碼）：');
+  if(!t||t.trim().length<4){showToast('輸入太短，取消','warn');return;}
+  localStorage.setItem('radar_sync_token',t.trim().slice(0,8));
+  showToast('同步碼已更換，正在重載…','ok');
+  setTimeout(()=>location.reload(),800);
+}
+
+function save(){
+  try{localStorage.setItem('radar_v9',JSON.stringify({wl,lastFetch}));}catch(e){}
+  // 同步到伺服器（背景，不阻塞）
+  const ts=Date.now();
+  fetch('/sync/save',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({token:SYNC_TOKEN,data:{wl,lastFetch},ts})
+  }).catch(()=>{});
+}
+
+async function loadFromServer(){
+  try{
+    const r=await fetch('/sync/load?token='+SYNC_TOKEN,{signal:AbortSignal.timeout(5000)});
+    const j=await r.json();
+    if(j.ok&&j.data){
+      const local=JSON.parse(localStorage.getItem('radar_v9')||'{}');
+      const localTs=local._ts||0;
+      if(j.ts>localTs){   // 伺服器資料較新
+        wl=j.data.wl||{};lastFetch=j.data.lastFetch||null;
+        localStorage.setItem('radar_v9',JSON.stringify({wl,lastFetch,_ts:j.ts}));
+        render();updateSchedUI();
+        return true;
+      }
+    }
+  }catch(e){}
+  return false;
+}
+
+function load(){
+  try{const r=localStorage.getItem('radar_v9');if(r){const d=JSON.parse(r);wl=d.wl||{};lastFetch=d.lastFetch||null;}}catch(e){}
+  // 載入後嘗試從伺服器同步（若更新則覆蓋）
+  loadFromServer();
+}
 
 let curTab='wind',filterStrat=null,sortCol=null,sortDir=-1;
 const expandState={};
@@ -647,6 +734,8 @@ window.dismissBuy=dismissBuy;
 window.closeModal=closeModal;
 window.addAllVisible=addAllVisible;
 window.toggleExpand=toggleExpand;
+window.copySyncToken=copySyncToken;
+window.changeSyncToken=changeSyncToken;
 </script>
 </body>
 </html>

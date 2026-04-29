@@ -34,6 +34,10 @@ TPEX_HEADERS = {
 _cache = {}
 _cache_lock = threading.Lock()
 
+# 跨裝置同步資料（依 token 隔離）
+_sync_store = {}
+_sync_lock  = threading.Lock()
+
 
 def get_cache(key, ttl=1800):
     with _cache_lock:
@@ -1133,6 +1137,38 @@ def index():
     base = os.path.dirname(os.path.abspath(__file__))
     with open(os.path.join(base, "index.html"), encoding="utf-8") as f:
         return f.read()
+
+
+@app.route("/sync/save", methods=["POST"])
+def sync_save():
+    """跨裝置同步：儲存 watchlist（依 token 隔離）"""
+    try:
+        body  = request.get_json(force=True) or {}
+        token = str(body.get("token", "")).strip()[:64]
+        data  = body.get("data")
+        ts    = int(body.get("ts", 0))
+        if not token or data is None:
+            return jsonify({"ok": False, "error": "missing token or data"})
+        with _sync_lock:
+            cur = _sync_store.get(token, {})
+            if ts >= cur.get("ts", 0):           # 只接受較新的資料
+                _sync_store[token] = {"data": data, "ts": ts}
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/sync/load")
+def sync_load():
+    """跨裝置同步：讀取 watchlist"""
+    token = str(request.args.get("token", "")).strip()[:64]
+    if not token:
+        return jsonify({"ok": False, "error": "missing token"})
+    with _sync_lock:
+        entry = _sync_store.get(token)
+    if entry:
+        return jsonify({"ok": True, "data": entry["data"], "ts": entry["ts"]})
+    return jsonify({"ok": True, "data": None, "ts": 0})
 
 
 if __name__ == "__main__":
