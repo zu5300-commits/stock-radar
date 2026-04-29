@@ -387,11 +387,53 @@ async function manualFetch(){
     // 自動把觸發任一策略的股票加入歷史紀錄
     WATCH_CODES.forEach(item=>autoAddSignal(item.code));
     lastFetch=nowISO();save();updateSchedUI();
+    // 若研發資料尚未就緒，排程背景自動補抓（3分鐘後）
+    const rdMissing=Object.values(data).some(d=>d.rd_ratio===null&&d.price>0);
+    if(rdMissing) scheduleRDCheck();
   } catch(e){
     showToast('❌ 抓取失敗，請稍後再試','warn');
   }
   btn.classList.remove('busy');ic.textContent='⬇';
   render();
+}
+
+let _rdCheckTimer=null;
+function scheduleRDCheck(){
+  if(_rdCheckTimer)clearTimeout(_rdCheckTimer);
+  showToast('🔬 研發資料背景抓取中，約3分鐘後自動更新…','info');
+  _rdCheckTimer=setTimeout(async()=>{
+    try{
+      const res=await fetch('/quote',{signal:AbortSignal.timeout(60000)});
+      const json=await res.json();
+      if(!json.ok)return;
+      const data=json.data||{};
+      let changed=false;
+      WATCH_CODES.forEach(item=>{
+        const d=data[item.code];
+        if(!d||!d.price)return;
+        const prev=liveData[item.code]||{};
+        // 若 rd_ratio 有新資料，更新 liveData
+        if(d.rd_ratio!=null&&prev.rd_ratio==null){
+          liveData[item.code]={...item,...d,met:metNow(d)};
+          changed=true;
+        } else if(d.debt_ratio!=null&&prev.debt_ratio==null){
+          liveData[item.code]={...item,...d,met:metNow(d)};
+          changed=true;
+        }
+      });
+      if(changed){
+        processDailySnapshot();
+        WATCH_CODES.forEach(item=>autoAddSignal(item.code));
+        save();render();
+        showToast('📡 研發資料已更新，⭐全部自動補入','ok');
+      } else {
+        // 資料還沒好，再等3分鐘
+        const stillMissing=Object.values(liveData).some(d=>d.rd_ratio===null&&d.price>0);
+        if(stillMissing)scheduleRDCheck();
+      }
+    }catch(e){}
+    _rdCheckTimer=null;
+  },3*60*1000);
 }
 
 function msUntil19(){const now=new Date(),next=new Date(now);next.setHours(19,0,0,0);if(next<=now)next.setDate(next.getDate()+1);return next-now;}
