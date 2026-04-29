@@ -275,19 +275,14 @@ def get_top100_prices():
 # ── 三大法人：TWSE T86 + TPEX 合併 ────────────────────────────────────────────
 
 def _fetch_t86_day(date_str):
-    """TWSE T86 三大法人（上市），失敗最多重試 2 次"""
-    import time as _time
+    """TWSE T86 三大法人（上市）"""
     url = "https://www.twse.com.tw/rwd/zh/fund/T86"
-    for attempt in range(3):
-      try:
+    try:
         r = req.get(url,
                     params={"response": "json", "date": date_str, "selectType": "ALL"},
                     headers=TWSE_HEADERS, timeout=30, verify=False)
         resp = r.json()
         if resp.get("stat") != "OK":
-            if attempt < 2:
-                _time.sleep(2)
-                continue
             return date_str, {}
         rows   = resp.get("data", [])
         fields = resp.get("fields", [])
@@ -311,18 +306,15 @@ def _fetch_t86_day(date_str):
             except (IndexError, Exception):
                 continue
         return date_str, day
-      except Exception as e:
-        print(f"[WARN] T86-TWSE {date_str} attempt={attempt}: {e}")
-        if attempt < 2:
-            _time.sleep(2)
-    return date_str, {}
+    except Exception as e:
+        print(f"[WARN] T86-TWSE {date_str}: {e}")
+        return date_str, {}
 
 
 def _fetch_tpex_inst_day(date_str):
     """
     TPEX 三大法人（上櫃）— 使用 3itrade_hedge_result.php。
     回傳 (date_str, {code: (foreign_net, trust_net)})
-    失敗最多重試 2 次。
 
     新版 API 資料在 tables[0]["data"]（舊版在頂層 aaData）。
     欄位索引（25欄，比 TWSE 多一欄「外資合計」）:
@@ -333,12 +325,10 @@ def _fetch_tpex_inst_day(date_str):
       [11-13]=投信 buy/sell/net            ← t_net = [13]
       其餘=自營商各項
     """
-    import time as _time
     roc = to_roc_date(date_str)
     url = ("https://www.tpex.org.tw/web/stock/3insti/daily_trade/"
            "3itrade_hedge_result.php")
-    for attempt in range(3):
-      try:
+    try:
         r = req.get(url,
                     params={"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc},
                     headers=TPEX_HEADERS, timeout=30, verify=False)
@@ -351,11 +341,8 @@ def _fetch_tpex_inst_day(date_str):
             if tables:
                 rows = tables[0].get("data", [])
 
-        print(f"[T86-TPEX] {date_str} roc={roc} rows={len(rows)} attempt={attempt}")
+        print(f"[T86-TPEX] {date_str} roc={roc} rows={len(rows)}")
         if not rows:
-            if attempt < 2:
-                _time.sleep(2)
-                continue
             return date_str, {}
 
         # 自動偵測外資/投信欄位索引
@@ -383,11 +370,9 @@ def _fetch_tpex_inst_day(date_str):
                 continue
         return date_str, day
 
-      except Exception as e:
-        print(f"[WARN] T86-TPEX {date_str} attempt={attempt}: {e}")
-        if attempt < 2:
-            _time.sleep(2)
-    return date_str, {}
+    except Exception as e:
+        print(f"[WARN] T86-TPEX {date_str}: {e}")
+        return date_str, {}
 
 
 _inst_bg_lock  = threading.Lock()
@@ -504,7 +489,7 @@ def quote():
         BUYUP_DAYS = 20
         for code, inst in inst_all.items():
             if (inst["foreign_days"] >= BUYUP_DAYS or inst["trust_days"] >= BUYUP_DAYS):
-                if code in price_data and code not in codes:
+                if code not in result and code in price_data and code not in codes:
                     codes.append(code)
 
         result = {}

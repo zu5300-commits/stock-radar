@@ -233,7 +233,7 @@ let WATCH_CODES = [];
 
 const isWind  = s => s.change>0 && (s.foreign_days||0)>=3 && (s.trust_days||0)>=3;
 const isRD    = s => s.price>100 && s.change>-3;
-const isBuyup = s => (s.foreign_days||0)>=3 || (s.trust_days||0)>=3;
+const isBuyup = s => (s.foreign_days||0)>=20 || (s.trust_days||0)>=20;
 const metNow  = s => { const m=[]; if(isWind(s))m.push('wind'); if(isRD(s))m.push('rd'); if(isBuyup(s))m.push('buyup'); return m; };
 
 let liveData={}, wl={}, lastFetch=null;
