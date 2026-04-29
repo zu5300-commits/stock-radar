@@ -529,32 +529,19 @@ _rd_bg_running = False
 def _compute_rd_data(codes):
     """
     對 codes 抓 FinMind:
-    - TaiwanStockBalanceSheet (5年) → 5年平均負債比
-    - TaiwanStockFinancialStatements (近5季) → 近4季研發費用合計
-    - TaiwanStockInfo → 流通股數（計算市值）
+    - TaiwanStockBalanceSheet (5年) → 5年平均負債比(Liabilities_per) + 最新股本(OrdinaryShare)
+    - TaiwanStockFinancialStatements (近5季) → 近4季OperatingExpenses合計
     回傳 {code: {debt_ratio, rd_expense, shares}}
     """
     now      = datetime.now()
     start_5y = (now - timedelta(days=365 * 5 + 60)).strftime("%Y-%m-%d")
     start_5q = (now - timedelta(days=420)).strftime("%Y-%m-%d")
 
-    # ① 一次取全部股票基本資訊（流通股數）
-    shares_map = {}
-    try:
-        for row in _fm_get("TaiwanStockInfo"):
-            code   = str(row.get("stock_id", "")).strip()
-            shares = to_int(row.get("sharesissued", 0))
-            if code and shares > 0:
-                shares_map[code] = shares
-        print(f"[RD] TaiwanStockInfo: {len(shares_map)} stocks")
-    except Exception as e:
-        print(f"[RD] TaiwanStockInfo: {e}")
-
     result = {}
-    # FinMind TaiwanStockFinancialStatements 無研發細項，改用 OperatingExpenses
-    # （營業費用 = 研發 + 銷售 + 管理），再用較低閾值過濾
+    # FinMind TaiwanStockFinancialStatements 有 OperatingExpenses（營業費用）
+    # = 研發 + 銷售 + 管理費用，以較低閾值(rr<8)過濾
     RD_TYPES = {
-        "OperatingExpenses",          # 營業費用（FinMind 可用）
+        "OperatingExpenses",
         "ResearchAndDevelopmentExpenses",  # 若未來 FinMind 加入，自動生效
         "研究發展費用", "研究費用", "研究與發展費用",
     }
@@ -571,29 +558,34 @@ def _compute_rd_data(codes):
             try:
                 _, bs, fs = fut.result()
 
-                # ── 5年平均負債比 ─────────────────────────────────────────────
-                # FinMind BalanceSheet 有 TotalAssets(資產總額) + Equity(權益總額)
-                # 無獨立 TotalLiabilities；負債比 = (Assets-Equity)/Assets×100
-                by_year = {}  # year → {assets, equity}
+                # ── 5年平均負債比 + 最新股本 ──────────────────────────────────
+                # Liabilities_per = 負債比(%) 直接可用
+                # OrdinaryShare   = 股本(元)，除以10=股數（面值10元/股）
+                by_year = {}   # year → {debt_pct, capital}
                 for row in bs:
                     try:
                         year = str(row.get("date", ""))[:4]
                         typ  = str(row.get("type", ""))
-                        val  = to_int(row.get("value", 0))
-                        if typ in ("TotalAssets", "資產總額", "資產總計"):
-                            by_year.setdefault(year, {})["assets"] = val
-                        elif typ in ("Equity", "權益總額", "權益總計"):
-                            by_year.setdefault(year, {})["equity"] = val
+                        val  = float(str(row.get("value", 0)).replace(",", "") or 0)
+                        if typ == "Liabilities_per":
+                            by_year.setdefault(year, {})["debt_pct"] = val
+                        elif typ in ("OrdinaryShare", "CapitalStock"):
+                            by_year.setdefault(year, {}).setdefault("capital", val)
                     except Exception:
                         continue
-                ratios = [
-                    (d["assets"] - d["equity"]) / d["assets"] * 100
-                    for d in by_year.values()
-                    if d.get("assets", 0) > 0 and "equity" in d
-                ]
-                debt_ratio = round(sum(ratios) / len(ratios), 1) if ratios else None
 
-                # ── 近4季研發費用合計 ─────────────────────────────────────────
+                debt_pcts = [d["debt_pct"] for d in by_year.values() if "debt_pct" in d]
+                debt_ratio = round(sum(debt_pcts) / len(debt_pcts), 1) if debt_pcts else None
+
+                # 取最新年份的股本
+                shares = 0
+                for yr in sorted(by_year.keys(), reverse=True):
+                    cap = by_year[yr].get("capital", 0)
+                    if cap > 0:
+                        shares = int(cap / 10)   # 面值10元/股
+                        break
+
+                # ── 近4季OperatingExpenses合計 ───────────────────────────────
                 rd_rows = sorted(
                     [r for r in fs if str(r.get("type", "")) in RD_TYPES],
                     key=lambda r: r.get("date", ""),
@@ -604,12 +596,15 @@ def _compute_rd_data(codes):
                 result[code] = {
                     "debt_ratio": debt_ratio,
                     "rd_expense": rd_expense,
-                    "shares":     shares_map.get(code, 0),
+                    "shares":     shares,
                 }
+                if debt_ratio is not None:
+                    print(f"[RD] {code}: debt={debt_ratio}% shares={shares//10000}萬 opex={rd_expense//1e8:.1f}億")
             except Exception as e:
                 print(f"[RD] {code}: {e}")
 
-    print(f"[RD] _compute_rd_data done: {len(result)} stocks")
+    valid = sum(1 for v in result.values() if v.get("debt_ratio") is not None)
+    print(f"[RD] _compute_rd_data done: {len(result)} stocks, {valid} with debt_ratio")
     return result
 
 
@@ -850,6 +845,18 @@ def debug_rd():
         "fm_test":             fm_test,
         "codes":               out,
     })
+
+
+@app.route("/clear-rd-cache")
+def clear_rd_cache():
+    """清除 rd_data 快取，讓下次 /quote 重新觸發背景抓取"""
+    with _cache_lock:
+        removed = "rd_data" in _cache
+        _cache.pop("rd_data", None)
+    with _rd_bg_lock:
+        global _rd_bg_running
+        _rd_bg_running = False
+    return jsonify({"ok": True, "cleared": removed, "msg": "請重新點『抓取行情』觸發背景更新"})
 
 
 @app.route("/test-yahoo")
