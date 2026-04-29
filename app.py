@@ -1,24 +1,30 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 import requests as req
 import urllib3
+import re
 import os
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
-# TWSE 憑證有 Missing Subject Key Identifier 問題，停用 SSL 警告
+# TWSE/TPEX 憑證問題，停用 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
-
-FM_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiV2luIiwiZW1haWwiOiJ6dTUzMDBAZ21haWwuY29tIn0.q5_lYazAnsTiNGKFdVNlIReL8Kq_FdwnkMd7IZKcPJI"
-FM_BASE  = "https://api.finmindtrade.com/api/v4/data"
 
 TWSE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "application/json, text/javascript, */*; q=0.01",
     "Referer": "https://www.twse.com.tw/",
+    "Accept-Language": "zh-TW,zh;q=0.9",
+}
+
+TPEX_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Referer": "https://www.tpex.org.tw/",
     "Accept-Language": "zh-TW,zh;q=0.9",
 }
 
@@ -47,12 +53,12 @@ def to_int(val):
 
 
 def parse_twse_date(raw):
-    """解析 TWSE 日期格式：西元8碼 20260425 → 2026/04/25，民國7碼 1150425 → 2026/04/25"""
+    """西元8碼 20260425 → 2026/04/25，民國7碼 1150425 → 2026/04/25"""
     try:
         raw = str(raw).strip()
-        if len(raw) == 8:  # 西元格式 YYYYMMDD
+        if len(raw) == 8:
             return f"{raw[:4]}/{raw[4:6]}/{raw[6:8]}"
-        if len(raw) == 7:  # 民國格式 YYYMMDD
+        if len(raw) == 7:
             year = int(raw[:3]) + 1911
             return f"{year}/{raw[3:5]}/{raw[5:7]}"
     except Exception:
@@ -60,22 +66,13 @@ def parse_twse_date(raw):
     return raw
 
 
-def calc_consecutive_days(inst, target_name):
-    daily = {}
-    for row in inst:
-        if row.get("name", "").strip() == target_name:
-            net = to_int(row.get("buy", 0)) - to_int(row.get("sell", 0))
-            daily[row["date"]] = net
-    count = 0
-    for date in sorted(daily.keys(), reverse=True):
-        if daily[date] > 0:
-            count += 1
-        else:
-            break
-    return count
+def to_roc_date(date_str):
+    """YYYYMMDD → 民國 YYY/MM/DD（TPEX 用）"""
+    year = int(date_str[:4]) - 1911
+    return f"{year}/{date_str[4:6]}/{date_str[6:8]}"
 
 
-def recent_weekdays(n=7):
+def recent_weekdays(n=30):
     """回傳最近 n 個工作日（西元格式 YYYYMMDD）"""
     result = []
     d = datetime.now()
@@ -86,12 +83,10 @@ def recent_weekdays(n=7):
     return result
 
 
+# ── TWSE 上市股票每日行情 ────────────────────────────────────────────────────────
+
 def fetch_twse_day(date_str):
-    """
-    嘗試從 TWSE 取得指定日期的全部上市股票資料。
-    date_str: YYYYMMDD 格式
-    回傳 (rows, date_label) 或 None
-    """
+    """取得 TWSE 指定日期全部上市股票資料"""
     urls = [
         "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL",
         "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL",
@@ -102,8 +97,7 @@ def fetch_twse_day(date_str):
                         headers=TWSE_HEADERS, timeout=30, verify=False)
             resp = r.json()
             rows = resp.get("data", [])
-            print(f"[TWSE] {url} date={date_str} "
-                  f"stat={resp.get('stat','?')} rows={len(rows)}")
+            print(f"[TWSE] {url} date={date_str} stat={resp.get('stat','?')} rows={len(rows)}")
             if rows:
                 return rows, parse_twse_date(resp.get("date", date_str))
         except Exception as e:
@@ -111,29 +105,13 @@ def fetch_twse_day(date_str):
     return None
 
 
-def get_top100_prices():
-    cached = get_cache("top100_prices")
-    if cached:
-        return cached
-
-    # 依序嘗試最近 7 個工作日，取第一筆有資料的
-    found = None
-    for date_str in recent_weekdays(7):
-        found = fetch_twse_day(date_str)
-        if found:
-            break
-
-    if not found:
-        print("[ERROR] All TWSE attempts returned empty data")
-        return [], {}, None, {}
-
-    rows, latest_date = found
+def _parse_twse_prices(rows):
+    """解析 TWSE STOCK_DAY_ALL rows → {code: {...}}，含名稱"""
     names = {}
-    latest_prices = {}
-
+    prices = {}
     for row in rows:
         try:
-            # 實際欄位（10欄）: [代號, 名稱, 成交股數, 成交金額, 開盤, 最高, 最低, 收盤, 漲跌(含符號如+3.05), 本益比]
+            # [代號, 名稱, 成交股數, 成交金額, 開盤, 最高, 最低, 收盤, 漲跌(+/-), 本益比]
             code    = str(row[0]).strip()
             name    = str(row[1]).strip()
             close_s = str(row[7]).replace(",", "").strip()
@@ -142,93 +120,406 @@ def get_top100_prices():
             close = float(close_s)
             if close <= 0:
                 continue
-
-            vol_s = str(row[2]).replace(",", "").strip()
-            vol   = int(vol_s) if vol_s not in ("--", "", "X") else 0
-
-            # row[8] 是漲跌（含符號），如 "+3.05" 或 "-1.23" 或 "0.00"
-            chg_s  = str(row[8]).replace(",", "").strip()
-            diff   = float(chg_s) if chg_s not in ("--", "", "X", "除權息", "除息", "除權") else 0
-            prev   = close - diff
-            change = round(diff / prev * 100, 2) if prev > 0 else 0
-
+            vol_s    = str(row[2]).replace(",", "").strip()
+            vol      = int(vol_s) if vol_s not in ("--", "", "X") else 0
+            chg_s    = str(row[8]).replace(",", "").strip()
+            diff     = float(chg_s) if chg_s not in ("--", "", "X", "除權息", "除息", "除權") else 0
+            prev     = close - diff
+            change   = round(diff / prev * 100, 2) if prev > 0 else 0
             tv_s     = str(row[3]).replace(",", "").strip()
             turnover = int(tv_s) if tv_s not in ("--", "", "X") else 0
-
             names[code] = name
-            latest_prices[code] = {
+            prices[code] = {
                 "price":         round(close, 2),
                 "change":        change,
                 "volume":        vol // 1000,
                 "trading_value": turnover,
+                "market":        "上市",
             }
         except (ValueError, IndexError, TypeError):
             continue
+    return names, prices
 
-    if not latest_prices:
+
+# ── TPEX 上櫃股票每日行情（OpenAPI）─────────────────────────────────────────────
+
+def fetch_tpex_day(date_str):
+    """
+    從 TPEX OpenAPI 取得上櫃股票每日行情。
+    回傳 (rows_list, date_str) 或 None。
+    rows_list 為 list of dict（OpenAPI 格式）
+    """
+    # OpenAPI 接受西元 YYYYMMDD
+    url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
+    try:
+        r = req.get(url, params={"date": date_str, "l": "zh-tw"},
+                    headers=TPEX_HEADERS, timeout=30, verify=False)
+        rows = r.json()  # list of dicts
+        if isinstance(rows, list) and rows:
+            print(f"[TPEX-OA] date={date_str} rows={len(rows)}")
+            return rows, date_str
+        print(f"[TPEX-OA] date={date_str} empty/unexpected: {str(rows)[:100]}")
+    except Exception as e:
+        print(f"[ERROR] TPEX-OA date={date_str}: {e}")
+    return None
+
+
+def _parse_tpex_prices(rows):
+    """
+    解析 TPEX OpenAPI rows（list of dict）→ {code: {...}}
+    常見欄位名稱（OpenAPI v1）:
+      SecuritiesCompanyCode / Close / Change / TradeVolume / TradeValue / CompanyName / Name
+    """
+    names  = {}
+    prices = {}
+    for row in rows:
+        try:
+            code = str(row.get("SecuritiesCompanyCode", "")).strip()
+            if not code:
+                continue
+            name = str(row.get("CompanyName", row.get("Name", code))).strip()
+
+            close_s = str(row.get("Close", "")).replace(",", "").strip()
+            if close_s in ("--", "", "除權息", "除息", "除權"):
+                continue
+            close = float(close_s)
+            if close <= 0:
+                continue
+
+            chg_s = str(row.get("Change", "0")).replace(",", "").strip()
+            chg_s = re.sub(r"<[^>]+>", "", chg_s).strip()
+            diff  = float(chg_s) if chg_s not in ("--", "", "除權息", "除息", "除權") else 0
+            prev  = close - diff
+            change = round(diff / prev * 100, 2) if prev > 0 else 0
+
+            # TradingShares (股) ÷ 1000 = 張數
+            vol_s = str(row.get("TradingShares", row.get("TradeVolume", "0"))).replace(",", "").strip()
+            vol   = int(vol_s) // 1000 if vol_s not in ("--", "") else 0
+
+            # TransactionAmount = 成交金額（NTD），用於排行
+            tv_s     = str(row.get("TransactionAmount", row.get("TradeValue", "0"))).replace(",", "").strip()
+            turnover = int(tv_s) if tv_s not in ("--", "") else 0
+
+            names[code] = name
+            prices[code] = {
+                "price":         round(close, 2),
+                "change":        change,
+                "volume":        vol // 1000,
+                "trading_value": turnover,
+                "market":        "上櫃",
+            }
+        except (ValueError, KeyError, TypeError):
+            continue
+    return names, prices
+
+
+# ── 合併上市＋上櫃，取成交值前 100 ────────────────────────────────────────────────
+
+def get_top100_prices():
+    cached = get_cache("top100_prices")
+    if cached:
+        return cached
+
+    # TWSE 和 TPEX 並行抓取
+    def _try_twse():
+        for d in recent_weekdays(7):
+            r = fetch_twse_day(d)
+            if r:
+                return r
+        return None
+
+    def _try_tpex():
+        for d in recent_weekdays(7):
+            r = fetch_tpex_day(d)
+            if r:
+                return r
+        return None
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f_twse = ex.submit(_try_twse)
+        f_tpex = ex.submit(_try_tpex)
+        twse_found = f_twse.result(timeout=40)
+        tpex_found = f_tpex.result(timeout=40)
+
+    all_names  = {}
+    all_prices = {}
+    latest_date = None
+
+    if twse_found:
+        rows, latest_date = twse_found
+        twse_names, twse_prices = _parse_twse_prices(rows)
+        all_names.update(twse_names)
+        all_prices.update(twse_prices)
+
+    if tpex_found:
+        rows, _ = tpex_found
+        tpex_names, tpex_prices = _parse_tpex_prices(rows)
+        all_names.update(tpex_names)
+        all_prices.update(tpex_prices)
+
+    if not all_prices:
+        print("[ERROR] No price data from TWSE or TPEX")
         return [], {}, None, {}
 
     top100 = sorted(
-        latest_prices.keys(),
-        key=lambda c: latest_prices[c]["trading_value"],
+        all_prices.keys(),
+        key=lambda c: all_prices[c]["trading_value"],
         reverse=True
     )[:100]
 
-    result = (top100, latest_prices, latest_date, names)
+    result = (top100, all_prices, latest_date, all_names)
     set_cache("top100_prices", result)
     return result
 
 
-def fetch_inst_one(code, start_30):
-    try:
-        r = req.get(FM_BASE, params={
-            "dataset":    "TaiwanStockInstitutionalInvestorsBuySell",
-            "data_id":    code,
-            "start_date": start_30,
-            "token":      FM_TOKEN,
-        }, timeout=20)
-        inst = r.json().get("data", [])
-        return code, {
-            "foreign_days": calc_consecutive_days(inst, "Foreign_Investor"),
-            "trust_days":   calc_consecutive_days(inst, "Investment_Trust"),
-        }
-    except Exception as e:
-        print(f"[WARN] inst {code}: {e}")
-        return code, {"foreign_days": 0, "trust_days": 0}
+# ── 三大法人：TWSE T86 + TPEX 合併 ────────────────────────────────────────────
 
+def _fetch_t86_day(date_str):
+    """TWSE T86 三大法人（上市），失敗最多重試 2 次"""
+    import time as _time
+    url = "https://www.twse.com.tw/rwd/zh/fund/T86"
+    for attempt in range(3):
+      try:
+        r = req.get(url,
+                    params={"response": "json", "date": date_str, "selectType": "ALL"},
+                    headers=TWSE_HEADERS, timeout=30, verify=False)
+        resp = r.json()
+        if resp.get("stat") != "OK":
+            if attempt < 2:
+                _time.sleep(2)
+                continue
+            return date_str, {}
+        rows   = resp.get("data", [])
+        fields = resp.get("fields", [])
+        print(f"[T86-TWSE] {date_str} rows={len(rows)}")
+
+        # 自動偵測欄位索引
+        f_idx, t_idx = 4, 10
+        for i, f in enumerate(fields):
+            if "外" in f and "買賣超" in f and "自營" not in f and i < 8:
+                f_idx = i
+            if "投信" in f and "買賣超" in f:
+                t_idx = i
+
+        day = {}
+        for row in rows:
+            try:
+                code = str(row[0]).strip()
+                if not code or not code[0].isdigit():
+                    continue
+                day[code] = (to_int(row[f_idx]), to_int(row[t_idx]))
+            except (IndexError, Exception):
+                continue
+        return date_str, day
+      except Exception as e:
+        print(f"[WARN] T86-TWSE {date_str} attempt={attempt}: {e}")
+        if attempt < 2:
+            _time.sleep(2)
+    return date_str, {}
+
+
+def _fetch_tpex_inst_day(date_str):
+    """
+    TPEX 三大法人（上櫃）— 使用 3itrade_hedge_result.php。
+    回傳 (date_str, {code: (foreign_net, trust_net)})
+    失敗最多重試 2 次。
+
+    新版 API 資料在 tables[0]["data"]（舊版在頂層 aaData）。
+    欄位索引（25欄，比 TWSE 多一欄「外資合計」）:
+      [0]=代號 [1]=名稱
+      [2-4]=外資(不含自營商) buy/sell/net  ← f_net = [4]
+      [5-7]=外資自營商 buy/sell/net
+      [8-10]=外資合計 buy/sell/net
+      [11-13]=投信 buy/sell/net            ← t_net = [13]
+      其餘=自營商各項
+    """
+    import time as _time
+    roc = to_roc_date(date_str)
+    url = ("https://www.tpex.org.tw/web/stock/3insti/daily_trade/"
+           "3itrade_hedge_result.php")
+    for attempt in range(3):
+      try:
+        r = req.get(url,
+                    params={"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc},
+                    headers=TPEX_HEADERS, timeout=30, verify=False)
+        resp = r.json()
+
+        # 新版：tables[0]["data"]；舊版：頂層 aaData（向下相容）
+        rows = resp.get("aaData", [])
+        if not rows:
+            tables = resp.get("tables", [])
+            if tables:
+                rows = tables[0].get("data", [])
+
+        print(f"[T86-TPEX] {date_str} roc={roc} rows={len(rows)} attempt={attempt}")
+        if not rows:
+            if attempt < 2:
+                _time.sleep(2)
+                continue
+            return date_str, {}
+
+        # 自動偵測外資/投信欄位索引
+        fields = []
+        tables = resp.get("tables", [])
+        if tables:
+            fields = tables[0].get("fields", [])
+        f_idx, t_idx = 4, 13  # TPEX 預設
+        for i, f in enumerate(fields):
+            if "外" in f and "買賣超" in f and "自營" not in f and "合計" not in f and i < 8:
+                f_idx = i
+            if "投信" in f and "買賣超" in f:
+                t_idx = i
+
+        day = {}
+        for row in rows:
+            try:
+                code = str(row[0]).strip()
+                if not code or not code[0].isdigit():
+                    continue
+                f_net = to_int(row[f_idx])
+                t_net = to_int(row[t_idx])
+                day[code] = (f_net, t_net)
+            except (IndexError, Exception):
+                continue
+        return date_str, day
+
+      except Exception as e:
+        print(f"[WARN] T86-TPEX {date_str} attempt={attempt}: {e}")
+        if attempt < 2:
+            _time.sleep(2)
+    return date_str, {}
+
+
+_inst_bg_lock  = threading.Lock()
+_inst_bg_running = False
+
+
+def _compute_inst(n_days):
+    """抓 n_days 個工作日的三大法人資料，回傳 {code: {foreign_days, trust_days}}"""
+    dates    = recent_weekdays(n_days)
+    all_days = {}
+    _lock    = threading.Lock()
+
+    def _merge(date_str, day_data):
+        if day_data:
+            with _lock:
+                all_days.setdefault(date_str, {}).update(day_data)
+
+    # workers=6：避免同時轟炸 TWSE/TPEX 被限速，分批送出確保資料完整
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        twse_futs = {executor.submit(_fetch_t86_day, d): d for d in dates}
+        tpex_futs = {executor.submit(_fetch_tpex_inst_day, d): d for d in dates}
+        for future in as_completed({**twse_futs, **tpex_futs}, timeout=120):
+            try:
+                date_str, day_data = future.result()
+                _merge(date_str, day_data)
+            except Exception:
+                pass
+
+    sorted_dates = sorted(all_days.keys(), reverse=True)
+    all_codes    = set(c for d in all_days.values() for c in d)
+    result = {}
+    for code in all_codes:
+        f_count = t_count = 0
+        for date in sorted_dates:
+            day = all_days.get(date, {})
+            if code not in day: continue
+            if day[code][0] > 0: f_count += 1
+            else: break
+        for date in sorted_dates:
+            day = all_days.get(date, {})
+            if code not in day: continue
+            if day[code][1] > 0: t_count += 1
+            else: break
+        result[code] = {"foreign_days": f_count, "trust_days": t_count}
+    return result
+
+
+def _start_bg_inst_fetch():
+    """如果沒有在跑，啟動背景 thread 抓 20 天法人資料"""
+    global _inst_bg_running
+    with _inst_bg_lock:
+        if _inst_bg_running:
+            return
+        _inst_bg_running = True
+
+    def _bg():
+        global _inst_bg_running
+        try:
+            result = _compute_inst(20)
+            set_cache("inst_all", result)
+            print(f"[BG] 20-day inst fetch done, {len(result)} stocks")
+        except Exception as e:
+            print(f"[BG] inst fetch error: {e}")
+        finally:
+            with _inst_bg_lock:
+                _inst_bg_running = False
+
+    threading.Thread(target=_bg, daemon=True).start()
+    print("[BG] 20-day inst background fetch started")
+
+
+def get_all_inst_data():
+    """
+    回傳三大法人連續買超天數。
+    - 有 20 天快取 → 直接用（≥20 天篩選準確）
+    - 沒有 → 同步抓 7 天（快速，確保 /quote 不超時），
+              並在背景抓 20 天（下次請求時即可使用）
+    """
+    # 20 天完整資料優先
+    cached = get_cache("inst_all")
+    if cached:
+        return cached
+
+    # 7 天快速資料（同步，不超時）
+    fast = get_cache("inst_fast")
+    if not fast:
+        fast = _compute_inst(7)
+        set_cache("inst_fast", fast)
+
+    # 背景補齊 20 天
+    _start_bg_inst_fetch()
+    return fast
+
+
+# ── API 路由 ──────────────────────────────────────────────────────────────────
 
 @app.route("/quote")
 def quote():
     try:
-        start_30 = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-
         top100, price_data, latest_date, names = get_top100_prices()
         if not top100:
             return jsonify({
                 "ok": False,
-                "error": "TWSE 目前無資料，請查看 /debug-twse 了解原因"
+                "error": "TWSE/TPEX 目前無資料，請查看 /debug-twse 了解原因"
             })
 
-        inst_results = {}
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = {executor.submit(fetch_inst_one, code, start_30): code
-                       for code in top100}
-            for future in as_completed(futures, timeout=90):
-                code, inst = future.result()
-                inst_results[code] = inst
+        inst_all = get_all_inst_data()
+
+        # 基本：成交值前 100
+        codes = list(top100)
+
+        # 補充：法人連續買超 ≥20 天，但不在前 100 的股票
+        # （price_data 已含全市場資料，不需額外 API call）
+        BUYUP_DAYS = 20
+        for code, inst in inst_all.items():
+            if (inst["foreign_days"] >= BUYUP_DAYS or inst["trust_days"] >= BUYUP_DAYS):
+                if code in price_data and code not in codes:
+                    codes.append(code)
 
         result = {}
-        for code in top100:
-            p = price_data[code]
+        for code in codes:
+            p    = price_data[code]
+            inst = inst_all.get(code, {"foreign_days": 0, "trust_days": 0})
             result[code] = {
                 "code":         code,
                 "name":         names.get(code, code),
-                "sector":       "—",
+                "sector":       p.get("market", "—"),
                 "price":        p["price"],
                 "change":       p["change"],
                 "volume":       p["volume"],
-                "foreign_days": inst_results.get(code, {}).get("foreign_days", 0),
-                "trust_days":   inst_results.get(code, {}).get("trust_days", 0),
+                "foreign_days": inst["foreign_days"],
+                "trust_days":   inst["trust_days"],
                 "error":        False,
             }
 
@@ -240,14 +531,39 @@ def quote():
         return jsonify({"ok": False, "error": str(e)})
 
 
+@app.route("/debug-inst")
+def debug_inst():
+    """檢查指定代號在快取裡的法人天數，及它是否在 price_data 裡"""
+    codes_to_check = request.args.get("codes", "00763U,00740B").split(",")
+    top100, price_data, latest_date, names = get_top100_prices()
+    inst_all  = get_cache("inst_all")
+    inst_fast = get_cache("inst_fast")
+    result = {}
+    for code in codes_to_check:
+        code = code.strip()
+        result[code] = {
+            "in_price_data": code in price_data,
+            "price":         price_data.get(code, {}).get("price"),
+            "market":        price_data.get(code, {}).get("market"),
+            "inst_all":      inst_all.get(code)  if inst_all  else "cache_empty",
+            "inst_fast":     inst_fast.get(code) if inst_fast else "cache_empty",
+            "in_top100":     code in top100,
+        }
+    return jsonify({
+        "inst_all_exists":  inst_all  is not None,
+        "inst_fast_exists": inst_fast is not None,
+        "inst_all_size":    len(inst_all)  if inst_all  else 0,
+        "max_foreign_all":  max((v["foreign_days"] for v in inst_all.values()),  default=0) if inst_all  else 0,
+        "codes": result,
+    })
+
+
 @app.route("/debug-twse")
 def debug_twse():
-    """偵錯：直接顯示 TWSE API 的原始回應（前 3 筆資料）"""
     results = []
-    for date_str in recent_weekdays(5):
+    for date_str in recent_weekdays(3):
         for url in [
             "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL",
-            "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL",
         ]:
             try:
                 r = req.get(url, params={"response": "json", "date": date_str},
@@ -255,17 +571,179 @@ def debug_twse():
                 resp = r.json()
                 rows = resp.get("data", [])
                 results.append({
-                    "url": url,
-                    "date_param": date_str,
+                    "url": url, "date_param": date_str,
                     "stat": resp.get("stat", "?"),
-                    "date_resp": resp.get("date", "?"),
                     "row_count": len(rows),
-                    "sample": rows[:3] if rows else [],
-                    "all_keys": list(resp.keys()),
+                    "sample": rows[:2] if rows else [],
                 })
             except Exception as e:
                 results.append({"url": url, "date_param": date_str, "error": str(e)})
     return jsonify(results)
+
+
+@app.route("/debug-t86")
+def debug_t86():
+    results = []
+    for date_str in recent_weekdays(2):
+        # TWSE T86
+        url = "https://www.twse.com.tw/rwd/zh/fund/T86"
+        try:
+            r = req.get(url,
+                        params={"response": "json", "date": date_str, "selectType": "ALL"},
+                        headers=TWSE_HEADERS, timeout=20, verify=False)
+            resp = r.json()
+            rows = resp.get("data", [])
+            results.append({
+                "source": "TWSE-T86", "date": date_str,
+                "stat": resp.get("stat", "?"),
+                "fields": resp.get("fields", []),
+                "row_count": len(rows),
+                "sample": rows[:2] if rows else [],
+            })
+        except Exception as e:
+            results.append({"source": "TWSE-T86", "date": date_str, "error": str(e)})
+
+        # TPEX 三大法人 (tables[0]["data"] 新格式)
+        roc = to_roc_date(date_str)
+        url2 = ("https://www.tpex.org.tw/web/stock/3insti/daily_trade/"
+                "3itrade_hedge_result.php")
+        try:
+            r = req.get(url2,
+                        params={"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc},
+                        headers=TPEX_HEADERS, timeout=20, verify=False)
+            resp2 = r.json()
+            rows = resp2.get("aaData", [])
+            if not rows:
+                tabs = resp2.get("tables", [])
+                if tabs:
+                    rows = tabs[0].get("data", [])
+            fields2 = []
+            tabs2 = resp2.get("tables", [])
+            if tabs2:
+                fields2 = tabs2[0].get("fields", [])
+            results.append({
+                "source": "TPEX-inst", "date": date_str, "roc": roc,
+                "row_count": len(rows),
+                "col_count": len(rows[0]) if rows else 0,
+                "fields": fields2,
+                "sample": rows[:2] if rows else [],
+            })
+        except Exception as e:
+            results.append({"source": "TPEX-inst", "date": date_str, "error": str(e)})
+
+        # TPEX 行情 (OpenAPI)
+        url3 = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
+        try:
+            r = req.get(url3, params={"date": date_str, "l": "zh-tw"},
+                        headers=TPEX_HEADERS, timeout=20, verify=False)
+            rows = r.json()
+            sample_keys = list(rows[0].keys()) if isinstance(rows, list) and rows else []
+            results.append({
+                "source": "TPEX-price-OA", "date": date_str,
+                "row_count": len(rows) if isinstance(rows, list) else 0,
+                "sample_keys": sample_keys,
+                "sample": rows[:2] if isinstance(rows, list) else rows,
+            })
+        except Exception as e:
+            results.append({"source": "TPEX-price-OA", "date": date_str, "error": str(e)})
+    return jsonify(results)
+
+
+@app.route("/debug-tpex-raw")
+def debug_tpex_raw():
+    """測試 TPEX 法人 API 各種參數組合，找出哪個真的回傳資料"""
+    dates = recent_weekdays(3)
+    date_str = dates[1]  # 前一個工作日
+    roc_slash = to_roc_date(date_str)          # 115/04/28
+    roc_plain = roc_slash.replace("/", "")     # 1150428
+    results = []
+
+    inst_url = ("https://www.tpex.org.tw/web/stock/3insti/daily_trade/"
+                "3itrade_hedge_result.php")
+
+    # 測試多種參數組合
+    combos = [
+        {"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc_slash},
+        {"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc_plain},
+        {"l": "zh-tw", "o": "json", "se": "EW",            "d": roc_slash},
+        {"l": "zh-tw", "o": "json",               "t": "D", "d": roc_slash},
+        {"l": "zh-tw", "o": "json", "se": "AL", "t": "D", "d": roc_slash},
+    ]
+    for p in combos:
+        try:
+            r = req.get(inst_url, params=p, headers=TPEX_HEADERS,
+                        timeout=15, verify=False)
+            raw = r.json()
+            aa    = raw.get("aaData", [])
+            tabs  = raw.get("tables", [])
+            tab0_keys  = list(tabs[0].keys()) if tabs else []
+            tab0_aa    = tabs[0].get("aaData", []) if tabs else []
+            tab0_data  = tabs[0].get("data", [])   if tabs else []
+            results.append({
+                "params": p,
+                "status": r.status_code,
+                "keys": list(raw.keys()),
+                "stat": raw.get("stat"),
+                "aaData_len": len(aa),
+                "tables_len": len(tabs),
+                "tables_t0_keys": tab0_keys,
+                "tables_t0_aaData_len": len(tab0_aa),
+                "tables_t0_data_len": len(tab0_data) if isinstance(tab0_data, list) else f"type:{type(tab0_data).__name__}",
+                "tables_t0_totalCount": tabs[0].get("totalCount") if tabs else None,
+                "sample": aa[0] if aa else (tab0_data[0] if isinstance(tab0_data, list) and tab0_data else []),
+            })
+        except Exception as e:
+            results.append({"params": p, "error": str(e)})
+
+    # 第一個 combo 顯示原始 response 文字
+    try:
+        r0 = req.get(inst_url,
+                     params={"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc_slash},
+                     headers=TPEX_HEADERS, timeout=15, verify=False)
+        results.append({
+            "raw_text_first200": r0.text[:200],
+            "content_type": r0.headers.get("Content-Type", ""),
+        })
+    except Exception as e:
+        results.append({"raw_error": str(e)})
+
+    # 試 POST 方式
+    try:
+        rp = req.post(inst_url,
+                      data={"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": roc_slash},
+                      headers={**TPEX_HEADERS,
+                                "Referer": "https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge.php",
+                                "X-Requested-With": "XMLHttpRequest"},
+                      timeout=15, verify=False)
+        rp_j = rp.json()
+        aa_p = rp_j.get("aaData", [])
+        results.append({
+            "method": "POST",
+            "status": rp.status_code,
+            "aaData_len": len(aa_p),
+            "stat": rp_j.get("stat"),
+            "sample": aa_p[0] if aa_p else [],
+        })
+    except Exception as e:
+        results.append({"method": "POST", "error": str(e)})
+
+    # 也試試較新的 OpenAPI v1 institution 端點（不同名稱）
+    for oa_name in ["tpex_mainboard_institution_buy_sell_total",
+                    "tpex_mainboard_3investors_buy_sell"]:
+        u = f"https://www.tpex.org.tw/openapi/v1/{oa_name}?date={date_str}&l=zh-tw"
+        try:
+            r = req.get(u, headers=TPEX_HEADERS, timeout=15, verify=False)
+            is_json = "json" in r.headers.get("Content-Type", "")
+            body = r.text[:200]
+            if is_json:
+                parsed = r.json()
+                body = f"JSON len={len(parsed) if isinstance(parsed, list) else type(parsed)}"
+            results.append({"oa_name": oa_name, "status": r.status_code,
+                            "is_json": is_json, "body": body})
+        except Exception as e:
+            results.append({"oa_name": oa_name, "error": str(e)})
+
+    return jsonify({"date_str": date_str, "roc_slash": roc_slash, "results": results})
 
 
 @app.route("/health")
