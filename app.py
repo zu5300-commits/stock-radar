@@ -850,6 +850,52 @@ def debug_rd():
     })
 
 
+@app.route("/debug-fm-datasets")
+def debug_fm_datasets():
+    """查詢 FinMind 所有合法 Taiwan dataset 名稱 + 測試 R&D 相關 dataset"""
+    import re as _re
+    # 1. 用不存在的名稱觸發 validation error，取得完整清單
+    try:
+        r = req.get(FM_BASE, params={
+            "dataset": "INVALID_DATASET_XYZ", "data_id": "4958",
+            "start_date": "2024-01-01", "token": FM_TOKEN
+        }, timeout=15)
+        raw = r.text
+        # 從 validation error 訊息提取所有 dataset 名稱
+        datasets = sorted(set(_re.findall(r"'(Taiwan\w+)'", raw)))
+    except Exception as e:
+        raw = str(e)
+        datasets = []
+
+    # 2. 試幾個可能含 R&D 的 dataset
+    rd_tests = {}
+    candidates = [
+        "TaiwanStockFinancialStatements",
+        "TaiwanStockCashFlowsStatement",
+        "TaiwanStockCapitalReductionReferencePrice",
+    ]
+    for ds in candidates:
+        try:
+            r2 = req.get(FM_BASE, params={
+                "dataset": ds, "data_id": "3035",
+                "start_date": "2024-10-01", "token": FM_TOKEN
+            }, timeout=15)
+            d2 = r2.json()
+            rows = d2.get("data", [])
+            types = sorted(set(r["type"] for r in rows if "type" in r))
+            rd_types = [t for t in types if any(k in t.lower() for k in
+                        ["research","develop","rd","研發","研究"])]
+            rd_tests[ds] = {"rows": len(rows), "all_types": types, "rd_types": rd_types}
+        except Exception as e:
+            rd_tests[ds] = {"error": str(e)}
+
+    return jsonify({
+        "all_taiwan_datasets": datasets,
+        "rd_type_search": rd_tests,
+        "raw_error_preview": raw[:500],
+    })
+
+
 @app.route("/debug-twse")
 def debug_twse():
     results = []
