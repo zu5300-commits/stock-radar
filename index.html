@@ -56,8 +56,9 @@ table.mt th{padding:6px 10px 10px;font-size:10px;font-weight:700;text-transform:
 .sr td:last-child{border-radius:0 8px 8px 0;}
 .sname{font-weight:700;font-size:13px;}
 .scode{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--txt2);margin-top:1px;}
-.stock-link{cursor:pointer;transition:color .15s;text-decoration:none;color:inherit;display:block;}
-.stock-link:hover .sname,.stock-link:active .sname{color:var(--accent);text-decoration:underline;}
+.stock-link{cursor:pointer;transition:color .15s;text-decoration:none;color:inherit;display:block;touch-action:manipulation;-webkit-tap-highlight-color:rgba(56,189,248,.15);padding:2px 0;}
+.stock-link:hover .sname,.stock-link:active .sname{color:var(--accent);}
+td:has(.stock-link){padding-left:10px;padding-right:4px;}
 .ssec{font-size:10px;color:var(--txt2);}
 .pv{font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:700;}
 .up{color:var(--red);}.dn{color:var(--green);}.fl{color:var(--gold);}
