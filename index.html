@@ -755,6 +755,12 @@ window.toggleExpand=toggleExpand;
 window.copySyncToken=copySyncToken;
 window.changeSyncToken=changeSyncToken;
 window.openChart=openChart;
+
+// Android 手機：表格內 <a> 觸控事件被 overflow-x 容器攔截，改用 touchend 強制開啟
+document.addEventListener('touchend', e=>{
+  const a=e.target.closest('a.stock-link');
+  if(a){e.preventDefault();window.open(a.href,'_blank');}
+},{passive:false});
 </script>
 </body>
 </html>
