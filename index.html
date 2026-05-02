@@ -56,8 +56,8 @@ table.mt th{padding:6px 10px 10px;font-size:10px;font-weight:700;text-transform:
 .sr td:last-child{border-radius:0 8px 8px 0;}
 .sname{font-weight:700;font-size:13px;}
 .scode{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--txt2);margin-top:1px;}
-.stock-link{cursor:pointer;transition:color .15s;}
-.stock-link:hover .sname{color:var(--accent);text-decoration:underline;}
+.stock-link{cursor:pointer;transition:color .15s;text-decoration:none;color:inherit;display:block;}
+.stock-link:hover .sname,.stock-link:active .sname{color:var(--accent);text-decoration:underline;}
 .ssec{font-size:10px;color:var(--txt2);}
 .pv{font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:700;}
 .up{color:var(--red);}.dn{color:var(--green);}.fl{color:var(--gold);}
@@ -630,7 +630,7 @@ function render(){
         const allMet=[...new Set(w.snapshots.flatMap(sn=>sn.met||[]))];
         const pChg=sigPrice>0&&hp?pDiff(sigPrice,s.price):null;
         return `<tr class="sr">
-          <td class="stock-link" onclick="openChart('${s.code}')"><div class="sname">${s.name||s.code}</div><div class="scode">${s.code}</div><div class="ssec">${s.sector||'—'}</div></td>
+          <td><a class="stock-link" href="https://tw.stock.yahoo.com/quote/${s.code}.TW" target="_blank" rel="noopener"><div class="sname">${s.name||s.code}</div><div class="scode">${s.code}</div><div class="ssec">${s.sector||'—'}</div></a></td>
           <td>
             <div class="pv ${cc(s.change||0)}">${hp?fmtP(s.price):'—'}</div>
             <div class="pv ${cc(s.change||0)}" style="font-size:12px">${hp?ps(s.change)+s.change.toFixed(2)+'%'+sg(s.change):'—'}</div>
@@ -658,7 +658,7 @@ function render(){
         if(inW){if(windNow)wsHtml=`<div class="ws ws-on">🌪️</div>`;else if(buf>0)wsHtml=`<div class="ws ws-buf">⏳${buf}/${WIND_BUFFER}</div>`;else wsHtml=`<div class="ws ws-off">⚫</div>`;}
         const hp=s.price>0;
         return `<tr class="sr">
-          <td class="stock-link" onclick="openChart('${s.code}')"><div class="sname">${s.name}</div><div class="scode">${s.code}</div><div class="ssec">${s.sector}</div>${wsHtml}</td>
+          <td><a class="stock-link" href="https://tw.stock.yahoo.com/quote/${s.code}.TW" target="_blank" rel="noopener"><div class="sname">${s.name}</div><div class="scode">${s.code}</div><div class="ssec">${s.sector}</div></a>${wsHtml}</td>
           <td><div class="pv ${cc(s.change)}">${hp?fmtP(s.price):'—'}</div></td>
           <td><div class="pv ${cc(s.change)}" style="font-size:13px">${hp?ps(s.change)+s.change.toFixed(2)+'%'+sg(s.change):'—'}</div></td>
           <td><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--txt2)">${hp?s.volume.toLocaleString()+'張':'—'}</span></td>
@@ -685,7 +685,7 @@ function render(){
       ${bb}
       <div class="wcard-head">
         <div class="wcard-top">
-          <div class="stock-link" onclick="openChart('${code}')"><div class="wcard-n">${s.name||code}</div><div class="wcard-c">${code}</div></div>
+          <a class="stock-link" href="https://tw.stock.yahoo.com/quote/${code}.TW" target="_blank" rel="noopener"><div class="wcard-n">${s.name||code}</div><div class="wcard-c">${code}</div></a>
           <span class="wremove" onclick="removeFromWatch('${code}')">✕</span>
         </div>
         <div class="wpr"><div class="wprice ${curCC}">${s.price?fmtP(s.price):'—'}</div><div class="wchg ${curCC}">${s.price?ps(s.change)+s.change.toFixed(2)+'%':''}</div></div>
