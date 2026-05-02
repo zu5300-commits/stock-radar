@@ -298,14 +298,14 @@ function autoAddSignal(code){
   const s=liveData[code];if(!s||!s.price)return;
   const met=metNow(s);if(!met.length)return;
   const stratLabel=met.map(m=>BM[m][1]).join('+');
-  wl[code]={stars:1,windActive:isWind(s),windMissCount:0,windCycles:0,hasBuySignal:false,
+  wl[code]={stars:1,name:s.name||code,sector:s.sector||'—',windActive:isWind(s),windMissCount:0,windCycles:0,hasBuySignal:false,
     snapshots:[{type:'entry',label:`📡 ${stratLabel} 觸發入選`,date:todayStr(),iso:nowISO(),price:s.price,stars:1,windCycle:0,met}]};
 }
 
 function addToWatch(code){
   if(wl[code])return;
-  const s=liveData[code]||WATCH_CODES.find(x=>x.code===code)||{code,name:code,price:0,change:0,volume:0};
-  wl[code]={stars:1,windActive:isWind(s),windMissCount:0,windCycles:0,hasBuySignal:false,
+  const s=liveData[code]||WATCH_CODES.find(x=>x.code===code)||{code,name:code,price:0,change:0,volume:0,sector:'—'};
+  wl[code]={stars:1,name:s.name||code,sector:s.sector||'—',windActive:isWind(s),windMissCount:0,windCycles:0,hasBuySignal:false,
     snapshots:[{type:'entry',label:'⭐ 入選追蹤（1星）',date:todayStr(),iso:nowISO(),price:s.price,stars:1,windCycle:0,met:metNow(s)}]};
   save();render();showToast(`✅ ${s.name} 加入追蹤（1★ @ ${fmtP(s.price)}）`,'ok');
 }
@@ -507,8 +507,8 @@ function changeSyncToken(){
 }
 
 function save(){
-  try{localStorage.setItem('radar_v9',JSON.stringify({wl,lastFetch}));}catch(e){}
-  // 同步到伺服器（背景，不阻塞）
+  try{localStorage.setItem('radar_v9',JSON.stringify({wl,lastFetch,liveData,WATCH_CODES}));}catch(e){}
+  // 同步到伺服器（只同步 wl+lastFetch，不傳大量行情資料）
   const ts=Date.now();
   fetch('/sync/save',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({token:SYNC_TOKEN,data:{wl,lastFetch},ts})
@@ -534,7 +534,17 @@ async function loadFromServer(){
 }
 
 function load(){
-  try{const r=localStorage.getItem('radar_v9');if(r){const d=JSON.parse(r);wl=d.wl||{};lastFetch=d.lastFetch||null;}}catch(e){}
+  try{
+    const r=localStorage.getItem('radar_v9');
+    if(r){
+      const d=JSON.parse(r);
+      wl=d.wl||{};
+      lastFetch=d.lastFetch||null;
+      // 恢復上次行情資料（週末也能看到最後一次篩選結果）
+      if(d.liveData&&Object.keys(d.liveData).length)liveData=d.liveData;
+      if(d.WATCH_CODES&&d.WATCH_CODES.length)WATCH_CODES=d.WATCH_CODES;
+    }
+  }catch(e){}
   // 載入後嘗試從伺服器同步（若更新則覆蓋）
   loadFromServer();
 }
@@ -545,8 +555,9 @@ function visibleList(){
   if(curTab==='all'){
     // ⭐ 全部 = 歷史紀錄：所有曾觸發策略的股票，依首次觸發日倒序
     return Object.keys(wl).map(code=>{
-      const s=liveData[code]||WATCH_CODES.find(x=>x.code===code)||{code,name:code,price:0,change:0,sector:'—'};
-      return{...s,code};
+      const w=wl[code];
+      const s=liveData[code]||WATCH_CODES.find(x=>x.code===code)||{code,name:w?.name||code,price:0,change:0,sector:w?.sector||'—'};
+      return{...s,name:s.name||w?.name||code,sector:s.sector||w?.sector||'—',code};
     }).sort((a,b)=>{
       const ia=wl[a.code]?.snapshots?.[0]?.iso||'';
       const ib=wl[b.code]?.snapshots?.[0]?.iso||'';
