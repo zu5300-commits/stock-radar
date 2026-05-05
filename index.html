@@ -321,7 +321,7 @@ function clearAll(){wl={};lastFetch=null;save();render();showToast('已清除全
 function dismissBuy(code){if(wl[code]){wl[code].hasBuySignal=false;save();render();}}
 
 function processDailySnapshot(){
-  if(isWeekend()){showToast('週末休市，不計算快照','warn');return;}
+  if(isMarketClosed()){showToast('休市日，不計算快照','warn');return;}
   const today=todayStr();const alerts=[];
   Object.keys(wl).forEach(code=>{
     const w=wl[code];const s=liveData[code];if(!s)return;
@@ -402,10 +402,34 @@ function processDailySnapshot(){
   lastFetch=nowISO();save();render();updateSchedUI();
 }
 
+// 台股休市日（週六日另外判斷，此處只列平日休市）
+const TW_HOLIDAYS=new Set([
+  // 2025
+  '2025-01-01',                                                          // 元旦
+  '2025-01-27','2025-01-28','2025-01-29','2025-01-30','2025-01-31',     // 春節
+  '2025-02-28',                                                          // 和平紀念日
+  '2025-04-03','2025-04-04',                                             // 兒童節+清明節
+  '2025-05-01',                                                          // 勞動節
+  '2025-06-02',                                                          // 端午節
+  '2025-10-06',                                                          // 中秋節
+  '2025-10-10',                                                          // 國慶日
+  // 2026
+  '2026-01-01',                                                          // 元旦
+  '2026-01-26','2026-01-27','2026-01-28','2026-01-29','2026-01-30',     // 春節
+  '2026-04-03',                                                          // 兒童節+清明(補假)
+  '2026-05-01',                                                          // 勞動節
+  '2026-06-19',                                                          // 端午節
+  '2026-09-25',                                                          // 中秋節
+  '2026-10-09',                                                          // 國慶日(補假)
+]);
 const isWeekend=()=>{const d=new Date().getDay();return d===0||d===6;};
+const isMarketClosed=()=>{
+  if(isWeekend())return true;
+  return TW_HOLIDAYS.has(todayStr());
+};
 
 async function manualFetch(){
-  if(isWeekend())showToast('週末休市，資料僅供參考','warn');
+  if(isMarketClosed())showToast('今日休市，資料僅供參考','warn');
   const btn=document.getElementById('btn-fetch');
   const ic=document.getElementById('fic');
   btn.classList.add('busy');ic.innerHTML='<span class="spin"></span>';
@@ -426,7 +450,7 @@ async function manualFetch(){
       }
     });
     showToast(`✅ 掃描完成：${ok}檔${fail>0?' / '+fail+'失敗':''}`,fail>0?'warn':'ok');
-    if(!isWeekend()){
+    if(!isMarketClosed()){
       processDailySnapshot();
       // 自動把觸發任一策略的股票加入歷史紀錄（只在交易日）
       WATCH_CODES.forEach(item=>autoAddSignal(item.code));
@@ -482,13 +506,13 @@ function scheduleRDCheck(){
 }
 
 function msUntil19(){const now=new Date(),next=new Date(now);next.setHours(19,0,0,0);if(next<=now)next.setDate(next.getDate()+1);return next-now;}
-function scheduleNext(){setTimeout(()=>{if(!isWeekend())manualFetch();scheduleNext();},msUntil19());}
+function scheduleNext(){setTimeout(()=>{if(!isMarketClosed())manualFetch();scheduleNext();},msUntil19());}
 // 排程不變，只有自動觸發才檢查週末
 function updateSchedUI(){
   document.getElementById('last-fetch').textContent=lastFetch?fmtDT(lastFetch):'尚未抓取';
   const done=lastFetch&&new Date(lastFetch).toDateString()===new Date().toDateString();
   const b=document.getElementById('fbadge');
-  if(isWeekend()){b.className='fbadge fb-wknd';b.textContent='週末休市';}
+  if(isMarketClosed()){b.className='fbadge fb-wknd';b.textContent='今日休市';}
   else if(done){b.className='fbadge fb-ok';b.textContent='今日已完成';}
   else{b.className='fbadge fb-wait';b.textContent='等待更新';}
 }
