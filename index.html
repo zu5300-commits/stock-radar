@@ -321,6 +321,7 @@ function clearAll(){wl={};lastFetch=null;save();render();showToast('已清除全
 function dismissBuy(code){if(wl[code]){wl[code].hasBuySignal=false;save();render();}}
 
 function processDailySnapshot(){
+  if(isWeekend()){showToast('週末休市，不計算快照','warn');return;}
   const today=todayStr();const alerts=[];
   Object.keys(wl).forEach(code=>{
     const w=wl[code];const s=liveData[code];if(!s)return;
@@ -425,9 +426,11 @@ async function manualFetch(){
       }
     });
     showToast(`✅ 掃描完成：${ok}檔${fail>0?' / '+fail+'失敗':''}`,fail>0?'warn':'ok');
-    processDailySnapshot();
-    // 自動把觸發任一策略的股票加入歷史紀錄
-    WATCH_CODES.forEach(item=>autoAddSignal(item.code));
+    if(!isWeekend()){
+      processDailySnapshot();
+      // 自動把觸發任一策略的股票加入歷史紀錄（只在交易日）
+      WATCH_CODES.forEach(item=>autoAddSignal(item.code));
+    }
     lastFetch=nowISO();save();updateSchedUI();
     // 若研發資料尚未就緒，排程背景自動補抓（3分鐘後）
     const rdMissing=Object.values(data).some(d=>d.rd_ratio===null&&d.price>0);
