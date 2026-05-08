@@ -56,9 +56,8 @@ table.mt th{padding:6px 10px 10px;font-size:10px;font-weight:700;text-transform:
 .sr td:last-child{border-radius:0 8px 8px 0;}
 .sname{font-weight:700;font-size:13px;}
 .scode{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--txt2);margin-top:1px;}
-.stock-link{cursor:pointer;transition:color .15s;text-decoration:none;color:inherit;display:block;touch-action:manipulation;-webkit-tap-highlight-color:rgba(56,189,248,.15);padding:2px 0;}
-.stock-link:hover .sname,.stock-link:active .sname{color:var(--accent);}
-td:has(.stock-link){padding-left:10px;padding-right:4px;}
+.stock-link{cursor:pointer;text-decoration:none;color:inherit;display:inline-block;touch-action:manipulation;-webkit-tap-highlight-color:rgba(56,189,248,.15);}
+.stock-link:hover .sname,.stock-link:active .sname{color:var(--accent);text-decoration:underline;}
 .ssec{font-size:10px;color:var(--txt2);}
 .pv{font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:700;}
 .up{color:var(--red);}.dn{color:var(--green);}.fl{color:var(--gold);}
@@ -658,7 +657,7 @@ function render(){
         const allMet=[...new Set(w.snapshots.flatMap(sn=>sn.met||[]))];
         const pChg=sigPrice>0&&hp?pDiff(sigPrice,s.price):null;
         return `<tr class="sr">
-          <td><a class="stock-link" href="https://tw.stock.yahoo.com/quote/${s.code}.TW" target="_blank" rel="noopener"><div class="sname">${s.name||s.code}</div><div class="scode">${s.code}</div><div class="ssec">${s.sector||'—'}</div></a></td>
+          <td><a class="stock-link" href="https://tw.stock.yahoo.com/quote/${s.code}.TW" target="_blank" rel="noopener"><div class="sname">${s.name||s.code}</div><div class="scode">${s.code}</div></a><div class="ssec">${s.sector||'—'}</div></td>
           <td>
             <div class="pv ${cc(s.change||0)}">${hp?fmtP(s.price):'—'}</div>
             <div class="pv ${cc(s.change||0)}" style="font-size:12px">${hp?ps(s.change)+s.change.toFixed(2)+'%'+sg(s.change):'—'}</div>
@@ -686,7 +685,7 @@ function render(){
         if(inW){if(windNow)wsHtml=`<div class="ws ws-on">🌪️</div>`;else if(buf>0)wsHtml=`<div class="ws ws-buf">⏳${buf}/${WIND_BUFFER}</div>`;else wsHtml=`<div class="ws ws-off">⚫</div>`;}
         const hp=s.price>0;
         return `<tr class="sr">
-          <td><a class="stock-link" href="https://tw.stock.yahoo.com/quote/${s.code}.TW" target="_blank" rel="noopener"><div class="sname">${s.name}</div><div class="scode">${s.code}</div><div class="ssec">${s.sector}</div></a>${wsHtml}</td>
+          <td><a class="stock-link" href="https://tw.stock.yahoo.com/quote/${s.code}.TW" target="_blank" rel="noopener"><div class="sname">${s.name}</div><div class="scode">${s.code}</div></a><div class="ssec">${s.sector}</div>${wsHtml}</td>
           <td><div class="pv ${cc(s.change)}">${hp?fmtP(s.price):'—'}</div></td>
           <td><div class="pv ${cc(s.change)}" style="font-size:13px">${hp?ps(s.change)+s.change.toFixed(2)+'%'+sg(s.change):'—'}</div></td>
           <td><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--txt2)">${hp?s.volume.toLocaleString()+'張':'—'}</span></td>
@@ -783,10 +782,17 @@ window.copySyncToken=copySyncToken;
 window.changeSyncToken=changeSyncToken;
 window.openChart=openChart;
 
-// Android 手機：表格內 <a> 觸控事件被 overflow-x 容器攔截，改用 touchend 強制開啟
-document.addEventListener('touchend', e=>{
+// Android 手機：偵測 touchstart 位置，touchend 時確認是「點擊」而非「滑動」才開啟連結
+let _txStart=0,_tyStart=0;
+document.addEventListener('touchstart',e=>{_txStart=e.touches[0].clientX;_tyStart=e.touches[0].clientY;},{passive:true});
+document.addEventListener('touchend',e=>{
   const a=e.target.closest('a.stock-link');
-  if(a){e.preventDefault();window.open(a.href,'_blank');}
+  if(!a)return;
+  const dx=Math.abs(e.changedTouches[0].clientX-_txStart);
+  const dy=Math.abs(e.changedTouches[0].clientY-_tyStart);
+  if(dx>8||dy>8)return; // 手指位移超過8px=滑動，不觸發
+  e.preventDefault();
+  window.open(a.href,'_blank');
 },{passive:false});
 </script>
 </body>
