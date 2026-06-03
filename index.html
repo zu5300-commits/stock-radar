@@ -539,12 +539,19 @@ function changeSyncToken(){
   setTimeout(()=>location.reload(),800);
 }
 
+let _localTs=0;          // 本機 wl 最後更新時間（毫秒）
+let _serverLoaded=false; // 是否已從伺服器載入過（避免慢回應蓋掉新資料）
+
 function save(){
-  try{localStorage.setItem('radar_v9',JSON.stringify({wl,lastFetch,liveData,WATCH_CODES}));}catch(e){}
-  // 同步到伺服器（只同步 wl+lastFetch，不傳大量行情資料）
-  const ts=Date.now();
+  _localTs=Date.now();
+  // 核心資料（wl）獨立存，最優先，絕不能因行情太大而失敗
+  try{localStorage.setItem('radar_v9',JSON.stringify({wl,lastFetch,_ts:_localTs}));}catch(e){}
+  // 行情資料分開存（容量大，失敗也不影響 wl）
+  try{localStorage.setItem('radar_live',JSON.stringify({liveData,WATCH_CODES}));}
+  catch(e){try{localStorage.removeItem('radar_live');}catch(_){}}
+  // 同步到伺服器（只同步 wl+lastFetch）
   fetch('/sync/save',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({token:SYNC_TOKEN,data:{wl,lastFetch},ts})
+    body:JSON.stringify({token:SYNC_TOKEN,data:{wl,lastFetch},ts:_localTs})
   }).catch(()=>{});
 }
 
@@ -552,17 +559,17 @@ async function loadFromServer(){
   try{
     const r=await fetch('/sync/load?token='+SYNC_TOKEN,{signal:AbortSignal.timeout(5000)});
     const j=await r.json();
-    if(j.ok&&j.data){
-      const local=JSON.parse(localStorage.getItem('radar_v9')||'{}');
-      const localTs=local._ts||0;
-      if(j.ts>localTs){   // 伺服器資料較新
-        wl=j.data.wl||{};lastFetch=j.data.lastFetch||null;
-        localStorage.setItem('radar_v9',JSON.stringify({wl,lastFetch,_ts:j.ts}));
-        render();updateSchedUI();
-        return true;
-      }
+    // 只有「伺服器資料嚴格比本機新」才覆蓋；若本機在等待期間已被更新，放棄覆蓋
+    if(j.ok&&j.data&&j.ts>_localTs){
+      _localTs=j.ts;
+      wl=j.data.wl||{};lastFetch=j.data.lastFetch||null;
+      try{localStorage.setItem('radar_v9',JSON.stringify({wl,lastFetch,_ts:_localTs}));}catch(e){}
+      render();updateSchedUI();
+      _serverLoaded=true;
+      return true;
     }
   }catch(e){}
+  _serverLoaded=true;
   return false;
 }
 
@@ -573,12 +580,18 @@ function load(){
       const d=JSON.parse(r);
       wl=d.wl||{};
       lastFetch=d.lastFetch||null;
-      // 恢復上次行情資料（週末也能看到最後一次篩選結果）
+      _localTs=d._ts||0;
+    }
+  }catch(e){}
+  try{
+    const r2=localStorage.getItem('radar_live');
+    if(r2){
+      const d=JSON.parse(r2);
       if(d.liveData&&Object.keys(d.liveData).length)liveData=d.liveData;
       if(d.WATCH_CODES&&d.WATCH_CODES.length)WATCH_CODES=d.WATCH_CODES;
     }
   }catch(e){}
-  // 載入後嘗試從伺服器同步（若更新則覆蓋）
+  // 載入後嘗試從伺服器同步（只有伺服器嚴格較新才覆蓋）
   loadFromServer();
 }
 
