@@ -219,6 +219,7 @@ table.st tr:last-child td{border-bottom:none;}
     <button class="btn btn-fetch" id="btn-fetch" onclick="manualFetch()">
       <span id="fic">⬇</span> 抓取行情
     </button>
+    <button class="btn btn-g" onclick="runBackfill()">📥 回補買超</button>
     <button class="btn btn-g" onclick="doExport()">匯出</button>
     <button class="btn btn-g" onclick="clearAll()">清除</button>
   </div>
@@ -772,6 +773,54 @@ function doExport(){
   try{navigator.clipboard.writeText(csv);showToast('✅ CSV 已複製','ok');}catch(e){}
 }
 
+// ── 歷史回補（買超） ──────────────────────────────────────────────
+function mergeBackfill(items){
+  let added=0,updated=0;
+  (items||[]).forEach(it=>{
+    const code=it.code;if(!code)return;
+    const iso=(it.first_date||todayStr())+'T08:00:00.000Z';
+    if(!wl[code]){
+      wl[code]={stars:1,name:it.name||code,sector:'—',windActive:false,windMissCount:0,windCycles:0,hasBuySignal:false,
+        snapshots:[{type:'entry',label:'📈 買超 歷史回補',date:it.first_date,iso,price:0,stars:1,windCycle:0,met:['buyup']}]};
+      added++;
+    }else{
+      const w=wl[code];const first=w.snapshots[0];
+      if(first&&it.first_date&&it.first_date<(first.date||'9999')){
+        first.date=it.first_date;first.iso=iso;
+        first.met=Array.from(new Set([...(first.met||[]),'buyup']));
+        updated++;
+      }
+    }
+  });
+  save();render();
+  showToast(`✅ 買超回補完成：新增 ${added} 檔${updated?'，更新 '+updated+' 檔':''}`,'ok');
+}
+
+let _bfPolling=false;
+async function runBackfill(){
+  if(_bfPolling){showToast('回補進行中，請稍候…','info');return;}
+  if(!confirm('回補過去約20個交易日的「買超」歷史（外資連續買超≥20天）？\n需要約1-3分鐘，請保持頁面開著。'))return;
+  _bfPolling=true;
+  showToast('⏳ 開始回補買超歷史，約1-3分鐘…','info');
+  try{
+    await fetch('/backfill/start',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({token:SYNC_TOKEN,days:20})});
+  }catch(e){_bfPolling=false;showToast('❌ 啟動回補失敗，請稍後再試','warn');return;}
+  let tries=0;
+  const poll=async()=>{
+    tries++;
+    try{
+      const r=await fetch('/backfill/status?token='+SYNC_TOKEN,{signal:AbortSignal.timeout(10000)});
+      const j=await r.json();
+      if(j.status==='done'){_bfPolling=false;mergeBackfill(j.result);return;}
+      if(j.status==='error'){_bfPolling=false;showToast('❌ 回補失敗：'+(j.error||''),'warn');return;}
+    }catch(e){}
+    if(tries<45){setTimeout(poll,5000);}
+    else{_bfPolling=false;showToast('回補逾時，資料量大請稍後再試一次','warn');}
+  };
+  setTimeout(poll,8000);
+}
+
 let _tt;
 function showToast(msg,type='info'){const el=document.getElementById('toast');el.textContent=msg;el.className=`toast show ${type}`;clearTimeout(_tt);_tt=setTimeout(()=>el.classList.remove('show'),3500);}
 
@@ -794,6 +843,7 @@ window.toggleExpand=toggleExpand;
 window.copySyncToken=copySyncToken;
 window.changeSyncToken=changeSyncToken;
 window.openChart=openChart;
+window.runBackfill=runBackfill;
 
 // Android 手機：偵測 touchstart 位置，touchend 時確認是「點擊」而非「滑動」才開啟連結
 let _txStart=0,_tyStart=0;

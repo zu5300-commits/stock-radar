@@ -1171,5 +1171,125 @@ def sync_load():
     return jsonify({"ok": True, "data": None, "ts": 0})
 
 
+# ── 歷史回補（買超：外資連續買超 ≥ 20 天） ──────────────────────────────────────
+_backfill_store = {}
+_backfill_lock  = threading.Lock()
+
+
+def _build_inst_days(n_days):
+    """抓 n_days 個交易日的法人買賣超，回傳 {date_str: {code: (f_net, t_net)}}（只保留有資料的交易日）"""
+    dates    = recent_weekdays(n_days)
+    all_days = {}
+    _lock    = threading.Lock()
+
+    def _merge(date_str, day_data):
+        if day_data:
+            with _lock:
+                all_days.setdefault(date_str, {}).update(day_data)
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        twse = {ex.submit(_fetch_t86_day, d): d for d in dates}
+        tpex = {ex.submit(_fetch_tpex_inst_day, d): d for d in dates}
+        for fut in as_completed({**twse, **tpex}, timeout=240):
+            try:
+                ds, dd = fut.result()
+                _merge(ds, dd)
+            except Exception:
+                pass
+    return {d: v for d, v in all_days.items() if v}
+
+
+def _consec_foreign_days(all_days, sorted_dates, anchor_idx, code):
+    """從 sorted_dates[anchor_idx] 往前數，外資連續買超天數（遇到非買超或無資料即中斷）"""
+    cnt = 0
+    for i in range(anchor_idx, len(sorted_dates)):
+        day = all_days.get(sorted_dates[i], {})
+        if code not in day:
+            break
+        if day[code][0] > 0:
+            cnt += 1
+        else:
+            break
+    return cnt
+
+
+def _run_backfill(token, window_days=20, BUYUP_DAYS=20):
+    """重建過去 window_days 個交易日，每檔「外資連續買超 ≥ BUYUP_DAYS」的首次達標日"""
+    try:
+        total        = window_days + BUYUP_DAYS + 15      # 多抓緩衝確保連續天數算得到
+        all_days     = _build_inst_days(total)
+        sorted_dates = sorted(all_days.keys(), reverse=True)   # 新 → 舊（YYYYMMDD）
+
+        # 取最近交易日的上市股票名稱
+        names = {}
+        if sorted_dates:
+            try:
+                rows, _ = fetch_twse_day(sorted_dates[0])
+                for row in (rows or []):
+                    try:
+                        names[str(row[0]).strip()] = str(row[1]).strip()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        first_trigger = {}   # code -> {date, fdays}
+        anchors = range(min(window_days, len(sorted_dates)))
+        # 由舊到新掃，記下第一次達標的日期
+        for idx in sorted(anchors, reverse=True):
+            date_str = sorted_dates[idx]
+            for code in all_days.get(date_str, {}):
+                if code in first_trigger:
+                    continue
+                fdays = _consec_foreign_days(all_days, sorted_dates, idx, code)
+                if fdays >= BUYUP_DAYS:
+                    first_trigger[code] = {"date": date_str, "fdays": fdays}
+
+        result = []
+        for code, info in first_trigger.items():
+            d = info["date"]
+            result.append({
+                "code":         code,
+                "name":         names.get(code, code),
+                "strategy":     "buyup",
+                "first_date":   f"{d[:4]}-{d[4:6]}-{d[6:8]}",
+                "foreign_days": info["fdays"],
+            })
+        result.sort(key=lambda x: x["first_date"])
+
+        with _backfill_lock:
+            _backfill_store[token] = {"status": "done", "result": result}
+        print(f"[BACKFILL] {token}: done, {len(result)} stocks")
+    except Exception as e:
+        print(f"[BACKFILL] {token}: error {e}")
+        with _backfill_lock:
+            _backfill_store[token] = {"status": "error", "error": str(e), "result": []}
+
+
+@app.route("/backfill/start", methods=["POST"])
+def backfill_start():
+    body  = request.get_json(force=True) or {}
+    token = str(body.get("token", "")).strip()[:64] or "default"
+    days  = max(5, min(int(body.get("days", 20)), 40))
+    with _backfill_lock:
+        cur = _backfill_store.get(token)
+        if cur and cur.get("status") == "running":
+            return jsonify({"ok": True, "status": "running"})
+        _backfill_store[token] = {"status": "running", "result": []}
+    threading.Thread(target=_run_backfill, args=(token, days), daemon=True).start()
+    return jsonify({"ok": True, "status": "started"})
+
+
+@app.route("/backfill/status")
+def backfill_status():
+    token = str(request.args.get("token", "")).strip()[:64] or "default"
+    with _backfill_lock:
+        entry = _backfill_store.get(token)
+    if not entry:
+        return jsonify({"ok": True, "status": "none"})
+    return jsonify({"ok": True, "status": entry["status"],
+                    "result": entry.get("result", []), "error": entry.get("error")})
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
