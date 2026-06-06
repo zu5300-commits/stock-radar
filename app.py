@@ -1177,25 +1177,28 @@ _backfill_lock  = threading.Lock()
 
 
 def _build_inst_days(n_days):
-    """抓 n_days 個交易日的法人買賣超，回傳 {date_str: {code: (f_net, t_net)}}（只保留有資料的交易日）"""
+    """
+    抓 n_days 個交易日的法人買賣超，回傳 {date_str: {code: (f_net, t_net)}}。
+    溫和模式：完全循序、每個請求間隔，避免被 TWSE/TPEX 封 IP，也不壓垮免費主機。
+    """
+    import time as _time
     dates    = recent_weekdays(n_days)
     all_days = {}
-    _lock    = threading.Lock()
-
-    def _merge(date_str, day_data):
-        if day_data:
-            with _lock:
-                all_days.setdefault(date_str, {}).update(day_data)
-
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        twse = {ex.submit(_fetch_t86_day, d): d for d in dates}
-        tpex = {ex.submit(_fetch_tpex_inst_day, d): d for d in dates}
-        for fut in as_completed({**twse, **tpex}, timeout=240):
-            try:
-                ds, dd = fut.result()
-                _merge(ds, dd)
-            except Exception:
-                pass
+    for d in dates:
+        try:
+            ds, dd = _fetch_t86_day(d)
+            if dd:
+                all_days.setdefault(ds, {}).update(dd)
+        except Exception:
+            pass
+        _time.sleep(1.2)                      # 節流：上市
+        try:
+            ds, dd = _fetch_tpex_inst_day(d)
+            if dd:
+                all_days.setdefault(ds, {}).update(dd)
+        except Exception:
+            pass
+        _time.sleep(1.2)                      # 節流：上櫃
     return {d: v for d, v in all_days.items() if v}
 
 
@@ -1216,7 +1219,7 @@ def _consec_foreign_days(all_days, sorted_dates, anchor_idx, code):
 def _run_backfill(token, window_days=20, BUYUP_DAYS=20):
     """重建過去 window_days 個交易日，每檔「外資連續買超 ≥ BUYUP_DAYS」的首次達標日"""
     try:
-        total        = window_days + BUYUP_DAYS + 15      # 多抓緩衝確保連續天數算得到
+        total        = window_days + BUYUP_DAYS + 3       # 多抓少量緩衝確保連續天數算得到
         all_days     = _build_inst_days(total)
         sorted_dates = sorted(all_days.keys(), reverse=True)   # 新 → 舊（YYYYMMDD）
 
