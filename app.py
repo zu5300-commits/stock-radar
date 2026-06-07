@@ -670,61 +670,66 @@ def get_all_inst_data():
 
 # ── API 路由 ──────────────────────────────────────────────────────────────────
 
+def compute_quote_data():
+    """抓取並組合行情資料，回傳 (result_dict, latest_date)。供 /quote 與 /cron/snapshot 共用。"""
+    top100, price_data, latest_date, names = get_top100_prices()
+    if not top100:
+        return None, None
+
+    inst_all = get_all_inst_data()
+
+    # 基本：成交值前 100
+    codes = list(top100)
+
+    # 補充：法人連續買超 ≥20 天，但不在前 100 的股票
+    BUYUP_DAYS = 20
+    for code, inst in inst_all.items():
+        if (inst["foreign_days"] >= BUYUP_DAYS or inst["trust_days"] >= BUYUP_DAYS):
+            if code in price_data and code not in codes:
+                codes.append(code)
+
+    # 研發基本面（背景抓，第一次為空不阻塞）
+    rd_data = get_rd_data(list(top100))
+    bwibbu  = fetch_bwibbu()
+
+    result = {}
+    for code in codes:
+        p    = price_data[code]
+        inst = inst_all.get(code, {"foreign_days": 0, "trust_days": 0})
+        rd   = rd_data.get(code, {})
+
+        price    = p["price"]
+        shares   = rd.get("shares", 0)
+        rd_exp   = rd.get("rd_expense", 0)
+        mkt_cap  = price * shares
+        rd_ratio = round(mkt_cap / rd_exp, 1) if rd_exp > 0 and mkt_cap > 0 else None
+
+        result[code] = {
+            "code":         code,
+            "name":         names.get(code, code),
+            "sector":       p.get("market", "—"),
+            "price":        price,
+            "change":       p["change"],
+            "volume":       p["volume"],
+            "foreign_days": inst["foreign_days"],
+            "trust_days":   inst["trust_days"],
+            "div_yield":    bwibbu.get(code),
+            "debt_ratio":   rd.get("debt_ratio"),
+            "rd_ratio":     rd_ratio,
+            "error":        False,
+        }
+    return result, latest_date
+
+
 @app.route("/quote")
 def quote():
     try:
-        top100, price_data, latest_date, names = get_top100_prices()
-        if not top100:
+        result, latest_date = compute_quote_data()
+        if result is None:
             return jsonify({
                 "ok": False,
                 "error": "TWSE/TPEX 目前無資料，請查看 /debug-twse 了解原因"
             })
-
-        inst_all = get_all_inst_data()
-
-        # 基本：成交值前 100
-        codes = list(top100)
-
-        # 補充：法人連續買超 ≥20 天，但不在前 100 的股票
-        # （price_data 已含全市場資料，不需額外 API call）
-        BUYUP_DAYS = 20
-        for code, inst in inst_all.items():
-            if (inst["foreign_days"] >= BUYUP_DAYS or inst["trust_days"] >= BUYUP_DAYS):
-                if code in price_data and code not in codes:
-                    codes.append(code)
-
-        # 研發基本面（背景抓，第一次為空不阻塞）
-        rd_data = get_rd_data(list(top100))
-        bwibbu  = fetch_bwibbu()
-
-        result = {}
-        for code in codes:
-            p    = price_data[code]
-            inst = inst_all.get(code, {"foreign_days": 0, "trust_days": 0})
-            rd   = rd_data.get(code, {})
-
-            # 計算市值/研發費用比
-            price    = p["price"]
-            shares   = rd.get("shares", 0)
-            rd_exp   = rd.get("rd_expense", 0)
-            mkt_cap  = price * shares                                   # 元
-            rd_ratio = round(mkt_cap / rd_exp, 1) if rd_exp > 0 and mkt_cap > 0 else None
-
-            result[code] = {
-                "code":         code,
-                "name":         names.get(code, code),
-                "sector":       p.get("market", "—"),
-                "price":        price,
-                "change":       p["change"],
-                "volume":       p["volume"],
-                "foreign_days": inst["foreign_days"],
-                "trust_days":   inst["trust_days"],
-                "div_yield":    bwibbu.get(code),     # 殖利率（%）
-                "debt_ratio":   rd.get("debt_ratio"), # 負債比（%）
-                "rd_ratio":     rd_ratio,             # 市值/研發費用
-                "error":        False,
-            }
-
         return jsonify({"ok": True, "data": result, "date": latest_date})
 
     except Exception as e:
@@ -1292,6 +1297,109 @@ def backfill_status():
         return jsonify({"ok": True, "status": "none"})
     return jsonify({"ok": True, "status": entry["status"],
                     "result": entry.get("result", []), "error": entry.get("error")})
+
+
+# ── 伺服器端每日自動快照（給外部排程器 cron-job.org 呼叫） ──────────────────────
+# 台股國定假日（與前端一致，平日休市才需列）
+_TW_HOLIDAYS = {
+    "2025-01-01","2025-01-27","2025-01-28","2025-01-29","2025-01-30","2025-01-31",
+    "2025-02-28","2025-04-03","2025-04-04","2025-05-01","2025-06-02","2025-10-06","2025-10-10",
+    "2026-01-01","2026-01-26","2026-01-27","2026-01-28","2026-01-29","2026-01-30",
+    "2026-04-03","2026-05-01","2026-06-19","2026-09-25","2026-10-09",
+}
+
+
+def _market_closed(now=None):
+    now = now or datetime.now()
+    if now.weekday() >= 5:                       # 週六(5)、週日(6)
+        return True
+    return now.strftime("%Y-%m-%d") in _TW_HOLIDAYS
+
+
+def _sig_wind(d):
+    return d.get("change", 0) > 0 and (d.get("foreign_days") or 0) >= 3 and (d.get("trust_days") or 0) >= 3
+
+
+def _sig_rd(d):
+    dr, dy, rr = d.get("debt_ratio"), d.get("div_yield"), d.get("rd_ratio")
+    if dr is None or dy is None or rr is None:
+        return False
+    return dr < 50 and dy > 1 and rr < 15
+
+
+def _sig_buyup(d):
+    return (d.get("foreign_days") or 0) >= 20
+
+
+_STRAT_ICON = {"wind": "🌪️", "rd": "🔬", "buyup": "📈"}
+
+
+@app.route("/cron/snapshot")
+def cron_snapshot():
+    """
+    外部排程器每個交易日呼叫一次：抓行情→把新觸發策略的股票記進該 token 的追蹤名單。
+    用法：/cron/snapshot?token=你的同步碼
+    為避免重複/被濫用，同一 token 6 小時內只處理一次。
+    """
+    token = str(request.args.get("token", "")).strip()[:64]
+    if not token:
+        return jsonify({"ok": False, "error": "missing token"})
+
+    now = datetime.now()
+    if _market_closed(now):
+        return jsonify({"ok": True, "skipped": "market closed"})
+
+    today   = now.strftime("%Y-%m-%d")
+    iso     = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    ts_ms   = int(now.timestamp() * 1000)
+
+    # 節流：6 小時內已處理過就跳過
+    with _sync_lock:
+        entry = _sync_store.get(token, {"data": {"wl": {}, "lastFetch": None}, "ts": 0})
+        last_cron = entry.get("cron_ts", 0)
+    if ts_ms - last_cron < 6 * 3600 * 1000:
+        return jsonify({"ok": True, "skipped": "throttled (<6h)"})
+
+    try:
+        data, _ = compute_quote_data()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+    if not data:
+        return jsonify({"ok": False, "error": "no market data"})
+
+    with _sync_lock:
+        entry = _sync_store.get(token, {"data": {"wl": {}, "lastFetch": None}, "ts": 0})
+        wl = entry.get("data", {}).get("wl", {}) or {}
+        added = 0
+        for code, d in data.items():
+            if not d.get("price"):
+                continue
+            met = []
+            if _sig_wind(d):  met.append("wind")
+            if _sig_rd(d):    met.append("rd")
+            if _sig_buyup(d): met.append("buyup")
+            if not met:
+                continue
+            if code in wl:                                # 歷史紀錄：已存在不重複加
+                continue
+            label = "📡 " + "+".join(_STRAT_ICON[m] for m in met) + " 觸發入選（自動）"
+            wl[code] = {
+                "stars": 1, "name": d.get("name", code), "sector": d.get("sector", "—"),
+                "windActive": "wind" in met, "windMissCount": 0, "windCycles": 0, "hasBuySignal": False,
+                "snapshots": [{
+                    "type": "entry", "label": label, "date": today, "iso": iso,
+                    "price": d.get("price", 0), "stars": 1, "windCycle": 0, "met": met,
+                }],
+            }
+            added += 1
+
+        entry["data"] = {"wl": wl, "lastFetch": iso}
+        entry["ts"] = ts_ms
+        entry["cron_ts"] = ts_ms
+        _sync_store[token] = entry
+
+    print(f"[CRON] {token}: snapshot done, +{added} new, total {len(wl)}")
+    return jsonify({"ok": True, "added": added, "total": len(wl), "date": today})
 
 
 if __name__ == "__main__":
