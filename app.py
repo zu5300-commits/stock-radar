@@ -38,6 +38,79 @@ _cache_lock = threading.Lock()
 _sync_store = {}
 _sync_lock  = threading.Lock()
 
+# ── Cloudflare R2 永久存檔（同步資料 durable backing）──────────────────────────
+# 沒設環境變數時 _r2=None，自動退回「純記憶體」模式，行為與舊版完全相同（絕不破壞現狀）。
+import json as _json
+R2_ENDPOINT = os.environ.get("R2_ENDPOINT", "").strip()
+R2_BUCKET   = os.environ.get("R2_BUCKET", "radar-sync").strip()
+R2_ACCESS   = os.environ.get("R2_ACCESS_KEY", "").strip()
+R2_SECRET   = os.environ.get("R2_SECRET_KEY", "").strip()
+
+_r2 = None
+if R2_ENDPOINT and R2_ACCESS and R2_SECRET:
+    try:
+        import boto3
+        from botocore.config import Config as _BotoConfig
+        _r2 = boto3.client(
+            "s3", endpoint_url=R2_ENDPOINT,
+            aws_access_key_id=R2_ACCESS, aws_secret_access_key=R2_SECRET,
+            region_name="auto",
+            config=_BotoConfig(signature_version="s3v4", retries={"max_attempts": 2}),
+        )
+        print(f"[R2] enabled, bucket={R2_BUCKET}")
+    except Exception as e:
+        print(f"[R2] init failed, fallback to memory-only: {e}")
+        _r2 = None
+else:
+    print("[R2] not configured (env vars missing) — memory-only mode")
+
+
+def _r2_key(token):
+    return f"sync/{token}.json"
+
+
+def _r2_get(token):
+    """從 R2 讀回某 token 的 entry；沒有或失敗回 None（首次 NoSuchKey 也走這）"""
+    if not _r2:
+        return None
+    try:
+        obj = _r2.get_object(Bucket=R2_BUCKET, Key=_r2_key(token))
+        return _json.loads(obj["Body"].read())
+    except Exception:
+        return None
+
+
+def _r2_put(token, entry):
+    """把 entry 寫進 R2（write-through）"""
+    if not _r2:
+        return
+    try:
+        _r2.put_object(Bucket=R2_BUCKET, Key=_r2_key(token),
+                       Body=_json.dumps(entry).encode("utf-8"),
+                       ContentType="application/json")
+    except Exception as e:
+        print(f"[R2] put failed token={token}: {e}")
+
+
+def _ensure_loaded(token):
+    """記憶體沒有此 token 時，從 R2 載回（主機冷啟動/重新部署後復原永久資料）"""
+    with _sync_lock:
+        if token in _sync_store:
+            return
+    r2entry = _r2_get(token)
+    if r2entry is not None:
+        with _sync_lock:
+            _sync_store.setdefault(token, r2entry)
+        print(f"[R2] restored token={token} from R2")
+
+
+def _persist(token):
+    """把記憶體中此 token 的 entry 寫回 R2"""
+    with _sync_lock:
+        entry = _sync_store.get(token)
+    if entry is not None:
+        _r2_put(token, entry)
+
 
 def get_cache(key, ttl=1800):
     with _cache_lock:
@@ -1154,10 +1227,15 @@ def sync_save():
         ts    = int(body.get("ts", 0))
         if not token or data is None:
             return jsonify({"ok": False, "error": "missing token or data"})
+        _ensure_loaded(token)                    # 冷啟動先從 R2 載回，避免舊資料蓋掉永久版
+        saved = False
         with _sync_lock:
             cur = _sync_store.get(token, {})
             if ts >= cur.get("ts", 0):           # 只接受較新的資料
-                _sync_store[token] = {"data": data, "ts": ts}
+                _sync_store[token] = {"data": data, "ts": ts, "cron_ts": cur.get("cron_ts", 0)}
+                saved = True
+        if saved:
+            _persist(token)                      # 寫進 R2 永久存檔
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
@@ -1169,6 +1247,7 @@ def sync_load():
     token = str(request.args.get("token", "")).strip()[:64]
     if not token:
         return jsonify({"ok": False, "error": "missing token"})
+    _ensure_loaded(token)                        # 冷啟動從 R2 載回永久資料
     with _sync_lock:
         entry = _sync_store.get(token)
     if entry:
@@ -1353,6 +1432,8 @@ def cron_snapshot():
     iso     = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
     ts_ms   = int(now.timestamp() * 1000)
 
+    _ensure_loaded(token)                        # 冷啟動從 R2 復原（節流時間+清單才正確）
+
     # 節流：6 小時內已處理過就跳過
     with _sync_lock:
         entry = _sync_store.get(token, {"data": {"wl": {}, "lastFetch": None}, "ts": 0})
@@ -1398,6 +1479,7 @@ def cron_snapshot():
         entry["cron_ts"] = ts_ms
         _sync_store[token] = entry
 
+    _persist(token)                              # 寫進 R2 永久存檔
     print(f"[CRON] {token}: snapshot done, +{added} new, total {len(wl)}")
     return jsonify({"ok": True, "added": added, "total": len(wl), "date": today})
 
