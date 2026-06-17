@@ -566,8 +566,15 @@ async function loadFromServer(){
     const j=await r.json();
     // 只有「伺服器資料嚴格比本機新」才覆蓋；若本機在等待期間已被更新，放棄覆蓋
     if(j.ok&&j.data&&j.ts>_localTs){
+      const incoming=j.data.wl||{};
+      const curN=Object.keys(wl||{}).length, newN=Object.keys(incoming).length;
+      // 安全網：雲端清單比本機「少」時(可能是別台誤清同步過來),先把本機現況備份,不讓資料無聲消失
+      if(curN>0 && newN<curN){
+        try{localStorage.setItem('radar_wl_backup',JSON.stringify({wl,lastFetch,backupAt:new Date().toISOString(),reason:'sync-shrink'}));}catch(e){}
+        showToast(`⚠️ 清單由 ${curN} 檔變 ${newN} 檔,已自動在本機備份`,'warn');
+      }
       _localTs=j.ts;
-      wl=j.data.wl||{};lastFetch=j.data.lastFetch||null;
+      wl=incoming;lastFetch=j.data.lastFetch||null;
       try{localStorage.setItem('radar_v9',JSON.stringify({wl,lastFetch,_ts:_localTs}));}catch(e){}
       render();updateSchedUI();
       _serverLoaded=true;
