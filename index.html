@@ -317,7 +317,11 @@ function addToWatch(code){
   save();render();showToast(`✅ ${s.name} 加入追蹤（1★ @ ${fmtP(s.price)}）`,'ok');
 }
 function removeFromWatch(code){delete wl[code];save();render();showToast('已移除','info');}
-function clearAll(){wl={};lastFetch=null;save();render();showToast('已清除全部','info');}
+function clearAll(){
+  if(!confirm('⚠️ 確定要清除全部追蹤清單嗎?\n\n會把「雲端＋手機＋電腦」的清單一起清空,而且無法復原!\n（系統會自動在這台裝置留一份備份）\n\n真的要清才按「確定」,不清請按「取消」。'))return;
+  try{localStorage.setItem('radar_wl_backup',JSON.stringify({wl,lastFetch,backupAt:new Date().toISOString()}));}catch(e){}
+  wl={};lastFetch=null;save();render();showToast('已清除（本機已留備份）','info');
+}
 function dismissBuy(code){if(wl[code]){wl[code].hasBuySignal=false;save();render();}}
 
 function processDailySnapshot(){
@@ -828,6 +832,11 @@ function tick(){const d=new Date();document.getElementById('clock').textContent=
 setInterval(tick,1000);tick();
 
 load();updateSchedUI();scheduleNext();render();
+
+// ── 自動同步：每 90 秒 + 每次切回此頁面時,自動向雲端對一次 ──
+// 只有「雲端比本機新」才會覆蓋(沿用 loadFromServer 既有判斷),不會蓋掉本機剛改的資料
+setInterval(()=>{if(document.visibilityState==='visible')loadFromServer();},90000);
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')loadFromServer();});
 
 // 確保所有函數在全域可存取（修復 onclick 找不到函數的問題）
 window.manualFetch=manualFetch;
