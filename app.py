@@ -475,6 +475,19 @@ _inst_bg_lock  = threading.Lock()
 _inst_bg_running = False
 
 
+# 指標上市股（台積電／鴻海／聯發科）— 幾乎每個交易日都在 T86 名單裡，
+# 用來判斷「上市(TWSE)三大法人」那批資料是否成功抓到。
+_SANITY_LISTED = ("2330", "2317", "2454")
+
+
+def _inst_is_healthy(result):
+    """法人連買快取是否健康：必須含足夠指標上市股；否則代表 TWSE(上市)那批抓失敗，
+    只剩上櫃(TPEX)→ 所有上市股連買天數都會被當 0，不可拿來覆蓋舊的好快取。"""
+    if not result:
+        return False
+    return sum(1 for c in _SANITY_LISTED if c in result) >= 2
+
+
 def _compute_inst(n_days):
     """抓 n_days 個工作日的三大法人資料，回傳 {code: {foreign_days, trust_days}}"""
     dates    = recent_weekdays(n_days)
@@ -497,8 +510,15 @@ def _compute_inst(n_days):
             except Exception:
                 pass
 
-    sorted_dates = sorted(all_days.keys(), reverse=True)
-    all_codes    = set(c for d in all_days.values() for c in d)
+    # 只保留「當天有抓到上市(TWSE)指標股」的交易日參與連續計算。
+    # 否則某天上市資料漏抓時，下面的 `code not in day → continue` 會把那天
+    # 當成不存在而跳過，導致連買天數虛報（跟看盤軟體對不上）。
+    good_dates = [d for d in all_days
+                  if any(c in all_days[d] for c in _SANITY_LISTED)]
+    if not good_dates:                       # 完全沒上市資料 → 退而用全部（至少上櫃能算）
+        good_dates = list(all_days.keys())
+    sorted_dates = sorted(good_dates, reverse=True)
+    all_codes    = set(c for d in good_dates for c in all_days[d])
     result = {}
     for code in all_codes:
         f_count = t_count = 0
@@ -528,8 +548,11 @@ def _start_bg_inst_fetch():
         global _inst_bg_running
         try:
             result = _compute_inst(20)
-            set_cache("inst_all", result)
-            print(f"[BG] 20-day inst fetch done, {len(result)} stocks")
+            if _inst_is_healthy(result):
+                set_cache("inst_all", result)
+                print(f"[BG] 20-day inst fetch done, {len(result)} stocks")
+            else:
+                print(f"[BG] 20-day inst INCOMPLETE ({len(result)} stocks, TWSE missing) — keep old cache, will retry")
         except Exception as e:
             print(f"[BG] inst fetch error: {e}")
         finally:
@@ -725,16 +748,18 @@ def get_all_inst_data():
     - 沒有 → 同步抓 7 天（快速，確保 /quote 不超時），
               並在背景抓 20 天（下次請求時即可使用）
     """
-    # 20 天完整資料優先
-    cached = get_cache("inst_all")
+    # 20 天完整資料優先（法人一天才更新一次，快取放長 6 小時，
+    # 減少頻繁重抓 20 天而觸發 TWSE 限速）
+    cached = get_cache("inst_all", ttl=21600)
     if cached:
         return cached
 
     # 7 天快速資料（同步，不超時）
-    fast = get_cache("inst_fast")
+    fast = get_cache("inst_fast", ttl=21600)
     if not fast:
         fast = _compute_inst(7)
-        set_cache("inst_fast", fast)
+        if _inst_is_healthy(fast):           # 殘缺(缺上市)就不存，下次再抓，避免毒化好資料
+            set_cache("inst_fast", fast)
 
     # 背景補齊 20 天
     _start_bg_inst_fetch()
