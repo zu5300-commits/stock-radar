@@ -1534,20 +1534,82 @@ def backfill_status():
 
 
 # ── 伺服器端每日自動快照（給外部排程器 cron-job.org 呼叫） ──────────────────────
-# 台股國定假日（與前端一致，平日休市才需列）
-_TW_HOLIDAYS = {
+# 台股休市日：主走「動態跟證交所要當年度休市表」（一勞永逸，不必每年手改）；
+# 抓不到時退回下方內建表當保險。內建表只需維持最近年度即可。
+_TW_HOLIDAYS_FALLBACK = {
+    # 2025（歷史保留）
     "2025-01-01","2025-01-27","2025-01-28","2025-01-29","2025-01-30","2025-01-31",
     "2025-02-28","2025-04-03","2025-04-04","2025-05-01","2025-06-02","2025-10-06","2025-10-10",
-    "2026-01-01","2026-01-26","2026-01-27","2026-01-28","2026-01-29","2026-01-30",
-    "2026-04-03","2026-05-01","2026-06-19","2026-09-25","2026-10-09",
+    # 2026（依證交所官方校正：農曆春節在 2 月，非 1 月）
+    "2026-01-01",
+    "2026-02-12","2026-02-13",                                              # 春節結算無交易
+    "2026-02-15","2026-02-16","2026-02-17","2026-02-18","2026-02-19","2026-02-20",  # 農曆除夕及春節
+    "2026-02-27","2026-02-28",                                              # 和平紀念日
+    "2026-04-03","2026-04-04","2026-04-05","2026-04-06",                    # 兒童節及民族掃墓節
+    "2026-05-01","2026-06-19","2026-09-25","2026-09-28",                    # 勞動/端午/中秋/教師節
+    "2026-10-09","2026-10-10","2026-10-25","2026-10-26","2026-12-25",       # 國慶/光復/行憲
 }
+
+# 動態休市表快取：{year:int -> set('YYYY-MM-DD')}；程式重啟清空，首次查詢自動重抓。
+_holiday_cache = {}
+_holiday_lock  = threading.Lock()
+
+
+def _fetch_holidays(year):
+    """跟證交所要某年度休市日，回 set('YYYY-MM-DD')；任何失敗回 None（呼叫端退回內建表）。
+    注意：證交所 data 內混了『開始交易日／最後交易日』這種【交易日】標記，要過濾掉，只留真正休市。"""
+    url = "https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySchedule"
+    try:
+        r = req.get(url, params={"response": "json", "queryYear": year},
+                    headers=TWSE_HEADERS, timeout=15, verify=False)
+        resp = r.json()
+        if str(resp.get("stat", "")).upper() != "OK":
+            return None
+        # 證交所尚未公布次年時會回退到當年資料，回的 queryYear 不符就別拿（免拿錯年汙染快取）
+        if resp.get("queryYear") and int(resp["queryYear"]) != int(year):
+            return None
+        days = set()
+        for row in resp.get("data", []):
+            try:
+                d    = str(row[0]).strip()
+                name = str(row[1]) if len(row) > 1 else ""
+            except (IndexError, Exception):
+                continue
+            if len(d) != 10 or not d.startswith(str(year)):
+                continue
+            if "開始交易" in name or "最後交易" in name:   # 這是交易日，不是休市
+                continue
+            days.add(d)
+        # sanity：正常一年休市日約 15~30 天，太少代表抓壞了
+        if len(days) < 10:
+            return None
+        return days
+    except Exception as e:
+        print(f"[WARN] holiday fetch {year}: {e}")
+        return None
+
+
+def _holidays_for(year):
+    """取某年度休市集合：記憶體快取 → 動態抓證交所 → 內建保險表。"""
+    with _holiday_lock:
+        if year in _holiday_cache:
+            return _holiday_cache[year]
+    got = _fetch_holidays(year)
+    if got is None:
+        got = {d for d in _TW_HOLIDAYS_FALLBACK if d.startswith(f"{year}-")}
+        print(f"[holiday] {year} 用內建保險表（動態抓失敗），{len(got)} 天")
+    else:
+        print(f"[holiday] {year} 動態抓成功，{len(got)} 天")
+    with _holiday_lock:
+        _holiday_cache[year] = got
+    return got
 
 
 def _market_closed(now=None):
     now = now or datetime.now()
     if now.weekday() >= 5:                       # 週六(5)、週日(6)
         return True
-    return now.strftime("%Y-%m-%d") in _TW_HOLIDAYS
+    return now.strftime("%Y-%m-%d") in _holidays_for(now.year)
 
 
 def _sig_wind(d):
