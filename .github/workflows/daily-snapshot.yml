@@ -1,0 +1,32 @@
+name: 選股雷達每日快照
+
+# 取代「綁龍哥電腦開機」的 Windows 排程(可靠性#6)。
+# 雲端跑,電腦關機/Windows 更新重啟都不影響。
+# cron 用 UTC:10:00 UTC = 台灣 18:00(盤後);週一~五。
+# 注意:GitHub 對「repo 連續 60 天無 commit」會自動停用排程 workflow(會寄信),
+#       故建議保留 Windows 排程當備援(/cron/snapshot 有 6h 節流,重複觸發無害)。
+on:
+  schedule:
+    - cron: '0 10 * * 1-5'
+  workflow_dispatch:        # 允許在 Actions 頁手動按鈕觸發(測試用)
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 戳 /cron/snapshot(抓盤後行情→更新選股清單)
+        run: |
+          if [ -z "${{ secrets.RADAR_TOKEN }}" ]; then
+            echo "::error::缺少 RADAR_TOKEN secret,請到 repo Settings → Secrets and variables → Actions 新增"
+            exit 1
+          fi
+          echo "呼叫 cron/snapshot(Render 免費方案冷啟動可能需 ~50s)…"
+          code=$(curl -sS --max-time 180 -o resp.txt -w "%{http_code}" \
+            "https://stock-radar-jwws.onrender.com/cron/snapshot?token=${{ secrets.RADAR_TOKEN }}")
+          echo "HTTP $code"
+          echo "回應:"; cat resp.txt; echo ""
+          # 2xx 才算成功(snapshot 即使 skipped 也是 200)
+          case "$code" in
+            2*) echo "✅ 觸發成功" ;;
+            *)  echo "::error::HTTP $code,觸發失敗"; exit 1 ;;
+          esac
