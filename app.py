@@ -1541,6 +1541,13 @@ def cron_snapshot():
     if ts_ms - last_cron < 6 * 3600 * 1000:
         return jsonify({"ok": True, "skipped": "throttled (<6h)"})
 
+    # 每日選股前先清掉法人快取，強制用「今天盤後最新」的法人資料重算
+    # （T86 約 15:00 後才公布；若沿用盤中舊快取會漏掉今天剛符合的股票）。
+    # _compute_inst 會先讀 R2 歷史、只補抓今天這一天，故快又正確。
+    with _cache_lock:
+        _cache.pop("inst_all", None)
+        _cache.pop("inst_fast", None)
+
     try:
         data, _ = compute_quote_data()
     except Exception as e:
