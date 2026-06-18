@@ -1406,33 +1406,54 @@ def index():
         return f.read()
 
 
+def _entry_ver(entry):
+    """取出 entry 的版本號（伺服器發的單調遞增整數）。
+    舊資料只有 ts（過去用 Date.now 存的）→ 拿 ts 當起始版本號，無痛遷移。"""
+    return int(entry.get("ver", entry.get("ts", 0)))
+
+
 @app.route("/sync/save", methods=["POST"])
 def sync_save():
-    """跨裝置同步：儲存 watchlist（依 token 隔離）"""
+    """跨裝置同步：儲存 watchlist（依 token 隔離）。
+    版本號由【伺服器】單調遞增發放，不再依賴各裝置的手錶時間（Date.now）──
+    避免兩台時鐘不一致時，時鐘快的永遠壓過慢的、慢的怎麼改都進不去（永遠對不齊的根因）。
+    樂觀鎖：client 帶 base=「我這份是基於哪個版本號改的」。只有 base 不落後於雲端現值才接受，
+    否則回 stale + 最新資料，讓 client 領回（龍哥拍板：後領回的那台先蓋回最新再改）。"""
     try:
         body  = request.get_json(force=True) or {}
         token = str(body.get("token", "")).strip()[:64]
         data  = body.get("data")
-        ts    = int(body.get("ts", 0))
+        base  = int(body.get("base", 0))         # client 載入時的版本號（新裝置/沒帶=0）
         if not token or data is None:
             return jsonify({"ok": False, "error": "missing token or data"})
         _ensure_loaded(token)                    # 冷啟動先從 R2 載回，避免舊資料蓋掉永久版
-        saved = False
+        saved   = False
+        new_ver = 0
+        latest  = None
         with _sync_lock:
-            cur = _sync_store.get(token, {})
-            if ts >= cur.get("ts", 0):           # 只接受較新的資料
-                _sync_store[token] = {"data": data, "ts": ts, "cron_ts": cur.get("cron_ts", 0)}
+            cur     = _sync_store.get(token, {})
+            cur_ver = _entry_ver(cur)
+            if base >= cur_ver:                  # client 基於最新(或更新)版本改 → 接受，版本 +1
+                new_ver = cur_ver + 1
+                _sync_store[token] = {"data": data, "ver": new_ver, "ts": new_ver,
+                                      "cron_ts": cur.get("cron_ts", 0)}
                 saved = True
+            else:                                # client 落後(還沒領到別台/cron 的更新)→ 拒絕
+                latest = cur
         if saved:
             _persist(token)                      # 寫進 R2 永久存檔
-        return jsonify({"ok": True})
+            return jsonify({"ok": True, "ver": new_ver})
+        # stale：回最新資料，client 領回後重做本次改動
+        return jsonify({"ok": True, "stale": True,
+                        "data": (latest or {}).get("data"),
+                        "ver": _entry_ver(latest or {})})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
 
 @app.route("/sync/load")
 def sync_load():
-    """跨裝置同步：讀取 watchlist"""
+    """跨裝置同步：讀取 watchlist。回傳伺服器發的版本號 ver（裝置只認它比新舊，不看手錶）。"""
     token = str(request.args.get("token", "")).strip()[:64]
     if not token:
         return jsonify({"ok": False, "error": "missing token"})
@@ -1440,8 +1461,9 @@ def sync_load():
     with _sync_lock:
         entry = _sync_store.get(token)
     if entry:
-        return jsonify({"ok": True, "data": entry["data"], "ts": entry["ts"]})
-    return jsonify({"ok": True, "data": None, "ts": 0})
+        ver = _entry_ver(entry)
+        return jsonify({"ok": True, "data": entry["data"], "ver": ver, "ts": ver})
+    return jsonify({"ok": True, "data": None, "ver": 0, "ts": 0})
 
 
 # ── 歷史回補（買超：外資連續買超 ≥ 20 天） ──────────────────────────────────────
@@ -1818,8 +1840,10 @@ def cron_snapshot():
             added += 1
 
         entry["data"] = {"wl": wl, "lastFetch": iso}
-        entry["ts"] = ts_ms
-        entry["cron_ts"] = ts_ms
+        new_ver = _entry_ver(entry) + 1          # 版本號 +1，裝置才領得到 cron 新加的股票
+        entry["ver"] = new_ver
+        entry["ts"] = new_ver
+        entry["cron_ts"] = ts_ms                 # cron_ts 仍記真實時間（毫秒），給 6 小時節流用
         _sync_store[token] = entry
 
     _persist(token)                              # 寫進 R2 永久存檔

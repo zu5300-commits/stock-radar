@@ -545,44 +545,72 @@ function changeSyncToken(){
   const t=prompt('輸入同步碼（可直接貼上另一台裝置的代碼）：');
   if(!t||t.trim().length<4){showToast('輸入太短，取消','warn');return;}
   localStorage.setItem('radar_sync_token',t.trim().slice(0,8));
+  // 換碼=切到另一份雲端資料，把本機版本號歸零，確保重載後第一次同步一定領回新碼的最新版（否則可能對不齊）
+  try{const r=localStorage.getItem('radar_v9');if(r){const d=JSON.parse(r);d._ver=0;localStorage.setItem('radar_v9',JSON.stringify(d));}}catch(e){}
   showToast('同步碼已更換，正在重載…','ok');
   setTimeout(()=>location.reload(),800);
 }
 
-let _localTs=0;          // 本機 wl 最後更新時間（毫秒）
-let _serverLoaded=false; // 是否已從伺服器載入過（避免慢回應蓋掉新資料）
+let _localVer=0;          // 本機 wl 對應的雲端版本號（伺服器發，不是手錶時間）
+let _serverLoaded=false;  // 是否已從伺服器載入過（避免慢回應蓋掉新資料）
+let _saveInFlight=false;  // 是否有一發 /sync/save 正在路上
+let _saveDirty=false;     // in-flight 期間又改過，待它回來再送最新一發
+
+// 把伺服器版本覆蓋到本機（含「清單變少先備份」安全網）。供 loadFromServer 與 stale 領回共用。
+function _applyServer(d, ver, note){
+  const incoming=(d&&d.wl)||{};
+  const curN=Object.keys(wl||{}).length, newN=Object.keys(incoming).length;
+  // 安全網：雲端清單比本機「少」時(可能是別台誤清同步過來),先把本機現況備份,不讓資料無聲消失
+  if(curN>0 && newN<curN){
+    try{localStorage.setItem('radar_wl_backup',JSON.stringify({wl,lastFetch,backupAt:new Date().toISOString(),reason:'sync-shrink'}));}catch(e){}
+    showToast(`⚠️ 清單由 ${curN} 檔變 ${newN} 檔,已自動在本機備份`,'warn');
+  }
+  _localVer=ver;
+  wl=incoming;lastFetch=(d&&d.lastFetch)||null;
+  try{localStorage.setItem('radar_v9',JSON.stringify({wl,lastFetch,_ver:_localVer}));}catch(e){}
+  render();updateSchedUI();
+  _serverLoaded=true;
+  if(note)showToast(note,'info');
+}
 
 function save(){
-  _localTs=Date.now();
   // 核心資料（wl）獨立存，最優先，絕不能因行情太大而失敗
-  try{localStorage.setItem('radar_v9',JSON.stringify({wl,lastFetch,_ts:_localTs}));}catch(e){}
+  try{localStorage.setItem('radar_v9',JSON.stringify({wl,lastFetch,_ver:_localVer}));}catch(e){}
   // 行情資料分開存（容量大，失敗也不影響 wl）
   try{localStorage.setItem('radar_live',JSON.stringify({liveData,WATCH_CODES}));}
   catch(e){try{localStorage.removeItem('radar_live');}catch(_){}}
-  // 同步到伺服器（只同步 wl+lastFetch）
+  _pushToServer();
+}
+
+// 同步到伺服器。串行化：同一台連續存只保留一發在路上，後續合併成「最後一發」，
+// 確保送出時帶的 base（_localVer）是前一發回來後的最新值，不會把自己的連續操作誤判成落後。
+function _pushToServer(){
+  if(_saveInFlight){_saveDirty=true;return;}
+  _saveInFlight=true;_saveDirty=false;
   fetch('/sync/save',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({token:SYNC_TOKEN,data:{wl,lastFetch},ts:_localTs})
-  }).catch(()=>{});
+    body:JSON.stringify({token:SYNC_TOKEN,data:{wl,lastFetch},base:_localVer})
+  }).then(r=>r.json()).then(j=>{
+    if(j&&j.ok){
+      if(j.stale){                         // 雲端有更新(別台/cron 先改了)→ 領回最新，本次改動需重做
+        _applyServer(j.data,j.ver,'雲端有更新版本，已領回最新');
+      }else if(typeof j.ver==='number'){   // 收下了，記住伺服器發的新版本號
+        _localVer=j.ver;
+        try{localStorage.setItem('radar_v9',JSON.stringify({wl,lastFetch,_ver:_localVer}));}catch(e){}
+      }
+    }
+  }).catch(()=>{}).finally(()=>{
+    _saveInFlight=false;
+    if(_saveDirty)_pushToServer();          // 期間又改過 → 用最新 wl + 最新版本號再送一發
+  });
 }
 
 async function loadFromServer(){
   try{
     const r=await fetch('/sync/load?token='+SYNC_TOKEN,{signal:AbortSignal.timeout(5000)});
     const j=await r.json();
-    // 只有「伺服器資料嚴格比本機新」才覆蓋；若本機在等待期間已被更新，放棄覆蓋
-    if(j.ok&&j.data&&j.ts>_localTs){
-      const incoming=j.data.wl||{};
-      const curN=Object.keys(wl||{}).length, newN=Object.keys(incoming).length;
-      // 安全網：雲端清單比本機「少」時(可能是別台誤清同步過來),先把本機現況備份,不讓資料無聲消失
-      if(curN>0 && newN<curN){
-        try{localStorage.setItem('radar_wl_backup',JSON.stringify({wl,lastFetch,backupAt:new Date().toISOString(),reason:'sync-shrink'}));}catch(e){}
-        showToast(`⚠️ 清單由 ${curN} 檔變 ${newN} 檔,已自動在本機備份`,'warn');
-      }
-      _localTs=j.ts;
-      wl=incoming;lastFetch=j.data.lastFetch||null;
-      try{localStorage.setItem('radar_v9',JSON.stringify({wl,lastFetch,_ts:_localTs}));}catch(e){}
-      render();updateSchedUI();
-      _serverLoaded=true;
+    // 只有「伺服器版本號嚴格比本機大」才覆蓋（版本號單調遞增，大就是真的較新，不看手錶）
+    if(j.ok&&j.data&&typeof j.ver==='number'&&j.ver>_localVer){
+      _applyServer(j.data,j.ver,null);
       return true;
     }
   }catch(e){}
@@ -597,7 +625,7 @@ function load(){
       const d=JSON.parse(r);
       wl=d.wl||{};
       lastFetch=d.lastFetch||null;
-      _localTs=d._ts||0;
+      _localVer=d._ver||0;   // 舊版存的是 _ts(手錶時間)，沒有 _ver → 0，升級後第一次同步必領回雲端最新
     }
   }catch(e){}
   try{
