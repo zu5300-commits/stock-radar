@@ -1423,7 +1423,7 @@ def sync_save():
         body  = request.get_json(force=True) or {}
         token = str(body.get("token", "")).strip()[:64]
         data  = body.get("data")
-        base  = int(body.get("base", 0))         # client 載入時的版本號（新裝置/沒帶=0）
+        base  = int(body.get("base") or 0)       # client 載入時的版本號（新裝置/沒帶/null 都當 0）
         if not token or data is None:
             return jsonify({"ok": False, "error": "missing token or data"})
         _ensure_loaded(token)                    # 冷啟動先從 R2 載回，避免舊資料蓋掉永久版

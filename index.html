@@ -587,8 +587,11 @@ function save(){
 function _pushToServer(){
   if(_saveInFlight){_saveDirty=true;return;}
   _saveInFlight=true;_saveDirty=false;
+  // 8 秒 timeout：萬一卡住(冷啟動/斷網)也會走 catch→finally 釋放 _saveInFlight，
+  // 不會讓串行化卡死、同步無聲停擺；釋放後若期間又改過會自動補送一發。
   fetch('/sync/save',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({token:SYNC_TOKEN,data:{wl,lastFetch},base:_localVer})
+    body:JSON.stringify({token:SYNC_TOKEN,data:{wl,lastFetch},base:_localVer}),
+    signal:AbortSignal.timeout(8000)
   }).then(r=>r.json()).then(j=>{
     if(j&&j.ok){
       if(j.stale){                         // 雲端有更新(別台/cron 先改了)→ 領回最新，本次改動需重做
