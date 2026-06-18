@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import time
 
 # TWSE/TPEX 憑證問題，停用 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -1759,11 +1760,25 @@ def cron_snapshot():
         _cache.pop("inst_all", None)
         _cache.pop("inst_fast", None)
 
-    try:
-        data, latest_date = compute_quote_data()
-    except Exception as e:
-        _write_health("error", now, date=today, msg=str(e)[:200])
-        return jsonify({"ok": False, "error": str(e)})
+    # B：冷啟動單發失敗保險——失敗自動重試一次（排程只戳一發，常打到 Render 休眠後的冷啟動；
+    #    第一發已把容器/快取暖起來，第二發大多會過）。
+    # A：空訊息例外（如冷啟動超時的 concurrent.futures.TimeoutError，str(e) 為 ''）改用
+    #    repr/型別名，避免再出現 error:"" 的無聲失敗、health 也記到名字、查得到原因。
+    data = latest_date = None
+    last_err = None
+    for attempt in range(2):
+        try:
+            data, latest_date = compute_quote_data()
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            if attempt == 0:
+                time.sleep(2)          # 暖機後再試一次
+    if last_err is not None:
+        emsg = (str(last_err) or repr(last_err) or type(last_err).__name__)[:200]
+        _write_health("error", now, date=today, msg=emsg)
+        return jsonify({"ok": False, "error": emsg})
     if not data:
         _write_health("no_data", now, date=today, msg="compute_quote_data 回空")
         return jsonify({"ok": True, "skipped": "no market data（颱風假/臨時休市 或 資料源異常）"})
