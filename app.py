@@ -92,6 +92,33 @@ def _r2_put(token, entry):
         print(f"[R2] put failed token={token}: {e}")
 
 
+def _r2_day_key(date_str):
+    return f"inst/{date_str}.json"
+
+
+def _r2_get_day(date_str):
+    """從 R2 讀某交易日的完整法人資料 {code:[f_net,t_net]}；沒有或失敗回 None"""
+    if not _r2:
+        return None
+    try:
+        obj = _r2.get_object(Bucket=R2_BUCKET, Key=_r2_day_key(date_str))
+        return _json.loads(obj["Body"].read())
+    except Exception:
+        return None
+
+
+def _r2_put_day(date_str, day_data):
+    """把某交易日完整法人資料寫進 R2（永久存檔，之後不必重抓）"""
+    if not _r2:
+        return
+    try:
+        _r2.put_object(Bucket=R2_BUCKET, Key=_r2_day_key(date_str),
+                       Body=_json.dumps(day_data).encode("utf-8"),
+                       ContentType="application/json")
+    except Exception as e:
+        print(f"[R2] put day failed {date_str}: {e}")
+
+
 def _ensure_loaded(token):
     """記憶體沒有此 token 時，從 R2 載回（主機冷啟動/重新部署後復原永久資料）"""
     with _sync_lock:
@@ -479,6 +506,10 @@ _inst_bg_running = False
 # 用來判斷「上市(TWSE)三大法人」那批資料是否成功抓到。
 _SANITY_LISTED = ("2330", "2317", "2454")
 
+# 指標上櫃股（環球晶／元太／穩懋）— 用來判斷「上櫃(TPEX)」那批是否抓到，
+# 確保存進 R2 永久檔的交易日「上市+上櫃」兩源都齊，不會永久缺一邊。
+_SANITY_OTC = ("6488", "8069", "3105")
+
 
 def _inst_is_healthy(result):
     """法人連買快取是否健康：必須含足夠指標上市股；否則代表 TWSE(上市)那批抓失敗，
@@ -488,27 +519,54 @@ def _inst_is_healthy(result):
     return sum(1 for c in _SANITY_LISTED if c in result) >= 2
 
 
+def _fetch_inst_day_full(date_str):
+    """抓某交易日完整法人資料(上市 T86 + 上櫃 TPEX 合併)。
+    回傳 (date_str, merged or None)。只有「上市+上櫃」兩個指標股都抓到，
+    才算這天完整、可以存進 R2 永久檔；任一源缺(抓失敗或非交易日)就回 None。"""
+    _, twse = _fetch_t86_day(date_str)
+    _, tpex = _fetch_tpex_inst_day(date_str)
+    merged = {}
+    merged.update(tpex or {})
+    merged.update(twse or {})            # 同代號以上市為準(理論上不重疊)
+    has_twse = any(c in merged for c in _SANITY_LISTED)
+    has_tpex = any(c in merged for c in _SANITY_OTC)
+    if not (has_twse and has_tpex):
+        return date_str, None            # 任一源缺 → 不完整，不存 R2
+    return date_str, merged
+
+
 def _compute_inst(n_days):
-    """抓 n_days 個工作日的三大法人資料，回傳 {code: {foreign_days, trust_days}}"""
+    """回傳近 n_days 個工作日的三大法人連買天數 {code: {foreign_days, trust_days}}。
+    資料來源：每個交易日的完整法人資料持久化在 R2(inst/<date>.json)，
+    先讀 R2，只有 R2 沒有的日才即時去 TWSE/TPEX 抓、抓到再存回 R2。
+    → 歷史只抓一次、永久累積，連買天數鏈不會因偶發漏抓而斷裂。"""
     dates    = recent_weekdays(n_days)
     all_days = {}
     _lock    = threading.Lock()
 
-    def _merge(date_str, day_data):
-        if day_data:
-            with _lock:
-                all_days.setdefault(date_str, {}).update(day_data)
+    # 1) 先從 R2 載入已存的完整交易日
+    need_fetch = []
+    for d in dates:
+        cached = _r2_get_day(d)
+        if cached:
+            all_days[d] = cached
+        else:
+            need_fetch.append(d)
 
-    # workers=6：避免同時轟炸 TWSE/TPEX 被限速，分批送出確保資料完整
-    with ThreadPoolExecutor(max_workers=6) as executor:
-        twse_futs = {executor.submit(_fetch_t86_day, d): d for d in dates}
-        tpex_futs = {executor.submit(_fetch_tpex_inst_day, d): d for d in dates}
-        for future in as_completed({**twse_futs, **tpex_futs}, timeout=120):
-            try:
-                date_str, day_data = future.result()
-                _merge(date_str, day_data)
-            except Exception:
-                pass
+    # 2) 只抓 R2 缺的日(workers=4 降並發避免 TWSE 限速)，完整才存回 R2
+    def _work(d):
+        try:
+            _, merged = _fetch_inst_day_full(d)
+        except Exception:
+            merged = None
+        if merged:
+            _r2_put_day(d, merged)
+            with _lock:
+                all_days[d] = merged
+
+    if need_fetch:
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            list(executor.map(_work, need_fetch))
 
     # 只保留「當天有抓到上市(TWSE)指標股」的交易日參與連續計算。
     # 否則某天上市資料漏抓時，下面的 `code not in day → continue` 會把那天
