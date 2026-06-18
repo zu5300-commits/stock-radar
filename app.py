@@ -1025,6 +1025,23 @@ def clear_rd_cache():
     return jsonify({"ok": True, "cleared": removed, "msg": "請重新點『抓取行情』觸發背景更新"})
 
 
+@app.route("/admin/refresh-inst")
+def admin_refresh_inst():
+    """維運用：清掉法人連買快取並同步重算（會把 R2 缺的交易日補抓進去）。
+    回補階段反覆呼叫即可逐步把 R2 補齊；資料源出包時也可手動重整。
+    安全性：只讀公開行情、自我收斂（每個缺日抓一次就存進 R2、之後直接讀 R2），
+    不碰任何同步清單，故不需密鑰。用法：/admin/refresh-inst"""
+    with _cache_lock:
+        _cache.pop("inst_all", None)
+        _cache.pop("inst_fast", None)
+    result = _compute_inst(20)                    # 同步重算：R2 有的日直接用，缺的日抓+存回 R2
+    healthy = _inst_is_healthy(result)
+    if healthy:
+        set_cache("inst_all", result)
+    sample = {c: result.get(c) for c in ("2379", "8996", "2887", "0050", "2330")}
+    return jsonify({"ok": True, "healthy": healthy, "size": len(result), "sample": sample})
+
+
 @app.route("/test-yahoo")
 def test_yahoo():
     """從 Render server 測試 Yahoo Finance 財報資料（含 R&D）"""
