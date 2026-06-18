@@ -1,4 +1,4 @@
-flask
-gunicorn
-requests
-boto3
+flask<4
+gunicorn<24
+requests<3
+boto3<2
