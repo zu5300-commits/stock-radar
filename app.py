@@ -1042,6 +1042,61 @@ def admin_refresh_inst():
     return jsonify({"ok": True, "healthy": healthy, "size": len(result), "sample": sample})
 
 
+@app.route("/admin/cleanup-inst")
+def admin_cleanup_inst():
+    """R2 法人每日檔保留政策：只留最新 keep_days 天(預設 90=約3個月)，清掉更舊的。
+    安全：預設「乾跑」(只列出會刪哪些、不真的刪)；要真的刪需帶 &confirm=1。
+    選股只需近 20 個交易日，刪 3 個月前的不影響。用法：
+      /admin/cleanup-inst            → 乾跑預覽
+      /admin/cleanup-inst?confirm=1  → 真的刪
+      /admin/cleanup-inst?keep_days=120&confirm=1"""
+    if not _r2:
+        return jsonify({"ok": False, "error": "R2 未設定"})
+    try:
+        keep_days = int(request.args.get("keep_days", "90"))
+    except ValueError:
+        keep_days = 90
+    confirm = request.args.get("confirm", "") in ("1", "true", "yes")
+    cutoff = (datetime.now() - timedelta(days=keep_days)).strftime("%Y%m%d")
+
+    # 列出 inst/ 下所有每日檔（分頁抓完）
+    keys = []
+    token = None
+    while True:
+        kw = {"Bucket": R2_BUCKET, "Prefix": "inst/"}
+        if token:
+            kw["ContinuationToken"] = token
+        resp = _r2.list_objects_v2(**kw)
+        for o in resp.get("Contents", []):
+            keys.append(o["Key"])
+        if resp.get("IsTruncated"):
+            token = resp.get("NextContinuationToken")
+        else:
+            break
+
+    # key 形如 inst/YYYYMMDD.json；YYYYMMDD 字典序＝日期序，可直接比
+    to_delete = []
+    for k in keys:
+        m = re.search(r"inst/(\d{8})\.json$", k)
+        if m and m.group(1) < cutoff:
+            to_delete.append(k)
+
+    deleted = 0
+    if confirm and to_delete:
+        for i in range(0, len(to_delete), 1000):       # delete_objects 一次最多 1000
+            batch = [{"Key": k} for k in to_delete[i:i + 1000]]
+            _r2.delete_objects(Bucket=R2_BUCKET, Delete={"Objects": batch})
+            deleted += len(batch)
+
+    return jsonify({
+        "ok": True, "dry_run": not confirm,
+        "keep_days": keep_days, "cutoff_before": cutoff,
+        "total_files": len(keys), "kept": len(keys) - len(to_delete),
+        "old_files": len(to_delete), "deleted": deleted,
+        "sample_to_delete": [k.split("/")[-1] for k in sorted(to_delete)[:10]],
+    })
+
+
 @app.route("/test-yahoo")
 def test_yahoo():
     """從 Render server 測試 Yahoo Finance 財報資料（含 R&D）"""

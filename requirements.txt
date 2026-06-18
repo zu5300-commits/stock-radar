@@ -1,5 +1,4 @@
 flask
 gunicorn
-yfinance
 requests
 boto3
