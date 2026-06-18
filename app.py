@@ -139,6 +139,39 @@ def _persist(token):
         _r2_put(token, entry)
 
 
+# ── 每日 snapshot 健康狀態（供外部健康檢查讀，#7 告警用）─────────────────────────
+_HEALTH_KEY = "health/snapshot.json"
+
+
+def _write_health(result, now, date="", added=0, total=0, msg=""):
+    """記錄每日 snapshot 結果到 R2（result: ok / no_data / error）。失敗不影響主流程。
+    只在『真的跑過的交易日』寫，休市/節流不寫，故永遠保留最後一次交易日的結果。"""
+    if not _r2:
+        return
+    rec = {
+        "result":  result,
+        "date":    date or now.strftime("%Y-%m-%d"),
+        "run_iso": now.strftime("%Y-%m-%dT%H:%M:%S"),
+        "added":   added, "total": total, "msg": msg,
+    }
+    try:
+        _r2.put_object(Bucket=R2_BUCKET, Key=_HEALTH_KEY,
+                       Body=_json.dumps(rec, ensure_ascii=False).encode("utf-8"),
+                       ContentType="application/json")
+    except Exception as e:
+        print(f"[health] write failed: {e}")
+
+
+def _read_health():
+    if not _r2:
+        return None
+    try:
+        obj = _r2.get_object(Bucket=R2_BUCKET, Key=_HEALTH_KEY)
+        return _json.loads(obj["Body"].read())
+    except Exception:
+        return None
+
+
 def get_cache(key, ttl=1800):
     with _cache_lock:
         entry = _cache.get(key)
@@ -1612,6 +1645,45 @@ def _market_closed(now=None):
     return now.strftime("%Y-%m-%d") in _holidays_for(now.year)
 
 
+def _last_trading_day(now=None):
+    """最近一個『應該已完成 snapshot』的交易日(YYYY-MM-DD)。
+    交易日 cron 約 18:00 跑，故當天 19:00 前先往前算一天，再跳過休市日往回找。"""
+    now = now or datetime.now()
+    d = now
+    if (not _market_closed(d)) and d.hour < 19:
+        d = d - timedelta(days=1)
+    for _ in range(15):                          # 最多回看 15 天（防連假）
+        if not _market_closed(d):
+            return d.strftime("%Y-%m-%d")
+        d = d - timedelta(days=1)
+    return d.strftime("%Y-%m-%d")
+
+
+@app.route("/health")
+def health():
+    """選股雷達每日 cron 健康判讀，給雞排每日健康檢查打（只需看 status 欄位）。
+    status: healthy / alert / unknown；alert 時 message 是給人看的告警文字。"""
+    now    = datetime.now()
+    expect = _last_trading_day(now)              # 最近『應已完成』的交易日
+    h      = _read_health() or {}
+    res, hdate = h.get("result"), str(h.get("date", ""))
+    if res == "ok" and hdate >= expect:
+        status  = "healthy"
+        message = f"選股雷達正常：{hdate} 已完成選股，追蹤 {h.get('total', 0)} 檔"
+    elif res in ("no_data", "error") and hdate >= expect:
+        status  = "alert"
+        message = (f"⚠️選股雷達 {hdate} 未更新（{res}）：{h.get('msg', '')}。"
+                   f"可能颱風假/臨時休市，或資料源異常—請看一眼")
+    elif hdate < expect:
+        status  = "alert"
+        message = (f"⚠️選股雷達漏跑：最近交易日 {expect} 應完成 snapshot，"
+                   f"但最後成功紀錄只到 {hdate or '(無)'}—cron 可能沒跑")
+    else:
+        status  = "unknown"
+        message = f"選股雷達狀態不明：result={res} date={hdate} expect={expect}"
+    return jsonify({"status": status, "message": message, "expect": expect, "raw": h})
+
+
 @app.route("/debug-holidays")
 def debug_holidays():
     """查某年度休市表(動態抓證交所,失敗退內建保險表)。維運/驗證用,只讀公開資料無密鑰。
@@ -1687,11 +1759,21 @@ def cron_snapshot():
         _cache.pop("inst_fast", None)
 
     try:
-        data, _ = compute_quote_data()
+        data, latest_date = compute_quote_data()
     except Exception as e:
+        _write_health("error", now, date=today, msg=str(e)[:200])
         return jsonify({"ok": False, "error": str(e)})
     if not data:
-        return jsonify({"ok": False, "error": "no market data"})
+        _write_health("no_data", now, date=today, msg="compute_quote_data 回空")
+        return jsonify({"ok": True, "skipped": "no market data（颱風假/臨時休市 或 資料源異常）"})
+
+    # 颱風／臨時休市偵測：證交所沒有今天資料時，抓取會自動回退到昨天，故不能看『有沒有資料』，
+    # 要看『最新行情日是不是今天』。不是今天＝今天沒開盤 → 不更新、不毒化，記異常待健康檢查告警。
+    # （latest_date 是 YYYY/MM/DD，today 是 YYYY-MM-DD，比對前正規化分隔符。）
+    ld = str(latest_date or "").replace("/", "-")
+    if ld != today:
+        _write_health("no_data", now, date=today, msg=f"最新行情日={latest_date or '無'}，非今天")
+        return jsonify({"ok": True, "skipped": f"no data for today（最新={latest_date}，颱風假/臨時休市）"})
 
     with _sync_lock:
         entry = _sync_store.get(token, {"data": {"wl": {}, "lastFetch": None}, "ts": 0})
@@ -1725,6 +1807,7 @@ def cron_snapshot():
         _sync_store[token] = entry
 
     _persist(token)                              # 寫進 R2 永久存檔
+    _write_health("ok", now, date=today, added=added, total=len(wl))
     print(f"[CRON] {token}: snapshot done, +{added} new, total {len(wl)}")
     return jsonify({"ok": True, "added": added, "total": len(wl), "date": today})
 
