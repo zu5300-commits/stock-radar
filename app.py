@@ -1612,6 +1612,27 @@ def _market_closed(now=None):
     return now.strftime("%Y-%m-%d") in _holidays_for(now.year)
 
 
+@app.route("/debug-holidays")
+def debug_holidays():
+    """查某年度休市表(動態抓證交所,失敗退內建保險表)。維運/驗證用,只讀公開資料無密鑰。
+    例:/debug-holidays?year=2026 → 看當年休市日 + 來源 + 今天是否休市。"""
+    try:
+        year = int(request.args.get("year", datetime.now().year))
+    except (ValueError, TypeError):
+        year = datetime.now().year
+    live = _fetch_holidays(year)
+    source = "live(證交所動態)" if live is not None else "fallback(內建保險表)"
+    days = _holidays_for(year)   # 經 cache + fallback 的最終結果
+    return jsonify({
+        "year":                year,
+        "source":              source,
+        "count":               len(days),
+        "today":               datetime.now().strftime("%Y-%m-%d"),
+        "today_market_closed": _market_closed(),
+        "days":                sorted(days),
+    })
+
+
 def _sig_wind(d):
     return d.get("change", 0) > 0 and (d.get("foreign_days") or 0) >= 3 and (d.get("trust_days") or 0) >= 3
 
