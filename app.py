@@ -1659,9 +1659,10 @@ def _last_trading_day(now=None):
     return d.strftime("%Y-%m-%d")
 
 
-@app.route("/health")
-def health():
+@app.route("/cron/health")
+def cron_health():
     """選股雷達每日 cron 健康判讀，給雞排每日健康檢查打（只需看 status 欄位）。
+    （注意：/health 已被既有 keep-alive 端點占用，故用 /cron/health。）
     status: healthy / alert / unknown；alert 時 message 是給人看的告警文字。"""
     now    = datetime.now()
     expect = _last_trading_day(now)              # 最近『應已完成』的交易日
