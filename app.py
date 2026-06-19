@@ -1746,6 +1746,113 @@ def _sig_buyup(d):
 
 _STRAT_ICON = {"wind": "🌪️", "rd": "🔬", "buyup": "📈"}
 
+# ── 每日快照（軌跡自動長）──────────────────────────────────────────────────────
+# 重現前端 index.html processDailySnapshot 的「逐檔」判定，讓後端 cron 每交易日
+# 幫已收錄股補一筆 daily / wind-lost / wind-retrigger(升星) 快照。判定函數
+# (_sig_wind/_sig_rd/_sig_buyup) 與前端 isWind/isRD/isBuyup 逐字一致，零漂移。
+WIND_BUFFER = 2                       # 風口連續消失幾日才正式記「風口消失」（同前端）
+_STAR_LABEL = ["", "⭐", "⭐⭐", "⭐⭐⭐"]   # 同前端 SL
+
+
+def _met_now(d):
+    """回傳該股當下命中的策略 list（順序固定 wind→rd→buyup，同前端 metNow）。"""
+    m = []
+    if _sig_wind(d):  m.append("wind")
+    if _sig_rd(d):    m.append("rd")
+    if _sig_buyup(d): m.append("buyup")
+    return m
+
+
+def _append_daily_snapshot(w, d, today, iso):
+    """
+    對單一「已收錄」股 w 補當日快照，重現前端 processDailySnapshot 的逐檔邏輯。
+    會原地修改 w（snapshots / stars / windActive / windMissCount / windCycles / hasBuySignal）。
+    回傳 True 表示有新增快照（含緩衝中的 daily）；False=今天已記過（去重）。
+    ⚠️ 僅對「當日仍在選股範圍(data)內」的股呼叫——與前端一致（前端對掉出範圍、
+       liveData[code] 為空的股是 if(!s)return 直接跳過，不補快照）。
+    """
+    snaps = w.get("snapshots", []) or []
+    # alreadyToday：今天已有非 wind-lost 快照 → 跳過（同前端第 332 行）
+    if any(sn.get("date") == today and sn.get("type") != "wind-lost" for sn in snaps):
+        return False
+
+    met       = _met_now(d)
+    wind_now  = _sig_wind(d)
+    price     = d.get("price", 0)
+    stars     = int(w.get("stars", 1) or 1)
+
+    # 上一筆「非 wind-lost」快照的 met，用來比較策略數量變化（同前端 lastSnap/prevMet）
+    prev_met = []
+    for sn in reversed(snaps):
+        if sn.get("type") != "wind-lost":
+            prev_met = sn.get("met", []) or []
+            break
+
+    wind_active = bool(w.get("windActive"))
+    miss        = int(w.get("windMissCount", 0) or 0)
+    cycles      = int(w.get("windCycles", 0) or 0)
+
+    # === 風口緩衝邏輯（同前端第 341-364 行）===
+    wind_retriggered = False
+    if wind_active and not wind_now:
+        miss += 1
+        if miss >= WIND_BUFFER:
+            # 連續 WIND_BUFFER 日消失 → 正式記錄風口消失，再往下記當日快照
+            w["windActive"] = False
+            w["windMissCount"] = 0
+            snaps.append({"type": "wind-lost", "label": f"🌪️ 風口消失（連續{WIND_BUFFER}日）",
+                          "date": today, "iso": iso, "price": None,
+                          "stars": stars, "windCycle": cycles, "met": []})
+            wind_active = False
+        else:
+            # 緩衝中：記一筆 daily 後直接返回（同前端 return）
+            w["windMissCount"] = miss
+            snaps.append({"type": "daily", "label": f"📅 快照（風口緩衝{miss}/{WIND_BUFFER}）",
+                          "date": today, "iso": iso, "price": price,
+                          "stars": stars, "windCycle": cycles, "met": met})
+            w["snapshots"] = snaps
+            return True
+    elif (not wind_active) and wind_now:
+        # 風口重觸發
+        wind_active = True
+        miss = 0
+        cycles += 1
+        wind_retriggered = True
+        w["windActive"] = True
+        w["windMissCount"] = 0
+        w["windCycles"] = cycles
+    elif wind_active and wind_now:
+        w["windMissCount"] = 0
+
+    # === 升星判斷（同前端第 366-384 行）===
+    prev_count = len(prev_met)
+    curr_count = len(met)
+    new_stars  = stars
+    reason     = ""
+    if wind_retriggered:
+        new_stars = min(stars + 1, 3)
+        reason    = f"風口重觸發（第{cycles}次）"
+    elif curr_count >= 3 and stars < 3:
+        new_stars = 3
+        reason    = "同時滿足全部3個策略"
+    elif curr_count >= 2 and prev_count < 2 and stars < 2:
+        new_stars = 2
+        reason    = "同時滿足2個策略"
+
+    if new_stars > stars:
+        w["stars"] = new_stars
+        w["hasBuySignal"] = True
+        snaps.append({"type": "wind-retrigger",
+                      "label": f"🔄 升至{_STAR_LABEL[new_stars]}（{reason}）",
+                      "date": today, "iso": iso, "price": price,
+                      "stars": new_stars, "windCycle": cycles, "met": met})
+    else:
+        snaps.append({"type": "daily", "label": "📅 每日快照",
+                      "date": today, "iso": iso, "price": price,
+                      "stars": stars, "windCycle": cycles, "met": met})
+    w["snapshots"] = snaps
+    return True
+
 
 @app.route("/cron/snapshot")
 def cron_snapshot():
@@ -1817,16 +1924,20 @@ def cron_snapshot():
         entry = _sync_store.get(token, {"data": {"wl": {}, "lastFetch": None}, "ts": 0})
         wl = entry.get("data", {}).get("wl", {}) or {}
         added = 0
+        daily_updated = 0
         for code, d in data.items():
             if not d.get("price"):
                 continue
-            met = []
-            if _sig_wind(d):  met.append("wind")
-            if _sig_rd(d):    met.append("rd")
-            if _sig_buyup(d): met.append("buyup")
-            if not met:
+            if code in wl:
+                # 已收錄股：補一筆每日快照（軌跡自動長；重現前端 processDailySnapshot）。
+                # 注意要先於下面的「met 為空就跳過」——已收錄股就算當日不命中任何策略，
+                # 仍需記 daily 追價、並讓風口緩衝/消失邏輯能推進。
+                if _append_daily_snapshot(wl[code], d, today, iso):
+                    daily_updated += 1
                 continue
-            if code in wl:                                # 歷史紀錄：已存在不重複加
+            # 未收錄股：符合任一策略才新增 entry（此段為原 cron 行為，未改動）
+            met = _met_now(d)
+            if not met:
                 continue
             label = "📡 " + "+".join(_STRAT_ICON[m] for m in met) + " 觸發入選（自動）"
             wl[code] = {
@@ -1848,8 +1959,8 @@ def cron_snapshot():
 
     _persist(token)                              # 寫進 R2 永久存檔
     _write_health("ok", now, date=today, added=added, total=len(wl))
-    print(f"[CRON] {token}: snapshot done, +{added} new, total {len(wl)}")
-    return jsonify({"ok": True, "added": added, "total": len(wl), "date": today})
+    print(f"[CRON] {token}: snapshot done, +{added} new, ~{daily_updated} daily, total {len(wl)}")
+    return jsonify({"ok": True, "added": added, "daily": daily_updated, "total": len(wl), "date": today})
 
 
 # ══════════════════════════════════════════════════════════════════════════════
