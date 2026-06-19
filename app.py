@@ -1917,6 +1917,20 @@ def _analyze_one(code, w):
                      and _an_iso(x) > _an_iso(first_wind)), None)
         end = lost or pre[-1]
         wind_hold = _an_daydiff(first_wind.get("date", ""), end.get("date", ""))
+    # 軌跡資料：每筆快照 → 報酬%（相對收錄價）+ 事件型別，供前端畫軌跡圖+事件標記
+    series = []
+    for x in snaps:
+        px = x.get("price")
+        ok = isinstance(px, (int, float)) and px > 0
+        series.append({
+            "date": x.get("date"),
+            "price": (px if ok else None),
+            "ret": (round((px / p0 - 1) * 100, 1) if ok else None),
+            "type": x.get("type"),
+            "met": x.get("met") or [],
+            "stars": int(x.get("stars") or 1),
+            "windCycle": int(x.get("windCycle") or 0),
+        })
     return {
         "code": code, "name": w.get("name", code),
         "entryMet": "+".join(entry.get("met") or []) or "-",
@@ -1930,6 +1944,7 @@ def _analyze_one(code, w):
         "snaps": len(snaps),
         "p0": p0, "pmax": pmax,
         "maxRet": round(max_ret, 1),
+        "series": series,
     }
 
 

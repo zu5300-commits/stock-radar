@@ -36,6 +36,12 @@
   .hide{ display:none; }
   .findings li{ margin:6px 0; }
   .topline{ display:flex; gap:14px; flex-wrap:wrap; align-items:baseline; }
+  select{ width:100%; padding:10px 12px; border-radius:9px; border:1px solid var(--line);
+          background:#0c1520; color:var(--fg); font-size:15px; margin-bottom:10px; }
+  .chartwrap{ width:100%; overflow-x:auto; }
+  .legend{ display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--mut); margin-top:8px; }
+  .legend span{ display:inline-flex; align-items:center; gap:5px; }
+  .dot{ width:10px; height:10px; border-radius:50%; display:inline-block; }
 </style>
 </head>
 <body>
@@ -49,6 +55,9 @@
     <input id="u" autocomplete="username" autocapitalize="off">
     <label>密碼</label>
     <input id="p" type="password" autocomplete="current-password">
+    <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer;color:var(--fg);">
+      <input id="remember" type="checkbox" style="width:auto;margin:0;"> 記住帳號
+    </label>
     <button id="go">登入</button>
     <div id="err" class="err"></div>
   </div>
@@ -75,6 +84,8 @@ async function login(){
     const j = await r.json();
     if(!j.ok){ $('#err').textContent='讀取失敗：'+(j.error||'未知'); $('#go').disabled=false; return; }
     sessionStorage.setItem('an_u',u); sessionStorage.setItem('an_p',p);
+    if($('#remember').checked) localStorage.setItem('an_remember_u',u);
+    else localStorage.removeItem('an_remember_u');
     render(j);
   }catch(e){ $('#err').textContent='連線失敗：'+e.message; $('#go').disabled=false; }
 }
@@ -138,6 +149,18 @@ function render(j){
       </ul>
     </div>
 
+    <div class="card">
+      <h2>績效軌跡圖（報酬%，事件標記）</h2>
+      <select id="chartPick">${rows.map(r=>`<option value="${r.code}">${r.name}（${fmtPct(r.maxRet)}）</option>`).join('')}</select>
+      <div class="chartwrap"><div id="chartBox"></div></div>
+      <div class="legend">
+        <span><i class="dot" style="background:#4493f8"></i>收錄入選</span>
+        <span><i class="dot" style="background:#90a4b6"></i>每日快照</span>
+        <span><i class="dot" style="background:#f85149"></i>風口停歇</span>
+        <span><i class="dot" style="background:#e3b341"></i>升星/重觸發</span>
+      </div>
+    </div>
+
     <div class="card"><h2>報酬分布（收錄價 → 軌跡最高價）</h2>
       <div class="scroll"><table><tr><th>報酬區間</th><th>檔數</th><th style="text-align:left">標的</th></tr>${distRows}</table></div></div>
 
@@ -161,6 +184,52 @@ function render(j){
       ③ 0050 為單一參考線、非逐檔同期對照（近似）。④ <b>本頁僅供研究，非投資建議。</b>
     </div>
   `;
+  // 軌跡圖綁定：預設顯示報酬最高那檔，可下拉切換
+  window._anRows = rows;
+  const pick = document.getElementById('chartPick');
+  if(pick){ pick.addEventListener('change', ()=>drawChart(pick.value)); drawChart(rows[0].code); }
+}
+
+function drawChart(code){
+  const r=(window._anRows||[]).find(x=>x.code===code);
+  const box=document.getElementById('chartBox');
+  if(!r||!box) return;
+  box.innerHTML=buildChartSVG(r);
+}
+
+function buildChartSVG(r){
+  const s=(r.series||[]).filter(p=>p.date);
+  if(s.length<2) return '<div class="note">此檔快照太少（&lt;2 筆），畫不出軌跡。多開主頁按「抓取行情」可累積。</div>';
+  const W=700,H=240,L=44,R=12,T=16,Bm=28;
+  const ts=d=>new Date(String(d).slice(0,10)).getTime();
+  const xs=s.map(p=>ts(p.date)); const xmin=Math.min(...xs),xmax=Math.max(...xs);
+  const rets=s.map(p=>p.ret).filter(v=>v!=null);
+  let ymin=Math.min(0,...rets),ymax=Math.max(0,...rets);
+  if(ymax===ymin) ymax=ymin+1;
+  const pd=(ymax-ymin)*0.12; ymin-=pd; ymax+=pd;
+  const X=t=>L+(xmax===xmin?0.5:(t-xmin)/(xmax-xmin))*(W-L-R);
+  const Y=v=>T+(1-(v-ymin)/(ymax-ymin))*(H-T-Bm);
+  let path='',pen=false;
+  s.forEach(p=>{ if(p.ret==null){pen=false;return;} const x=X(ts(p.date)),y=Y(p.ret);
+    path+=(pen?'L':'M')+x.toFixed(1)+' '+y.toFixed(1)+' '; pen=true; });
+  let yticks='';
+  for(let k=0;k<=2;k++){ const v=ymin+(ymax-ymin)*k/2, y=Y(v);
+    yticks+=`<line x1="${L}" y1="${y.toFixed(1)}" x2="${W-R}" y2="${y.toFixed(1)}" stroke="#26384a" stroke-width="0.5"/>`
+          +`<text x="4" y="${(y+4).toFixed(1)}" fill="#90a4b6" font-size="11">${v.toFixed(0)}%</text>`; }
+  const col=p=>p.type==='entry'?['#4493f8',5]:p.type==='wind-lost'?['#f85149',4]:p.type==='wind-retrigger'?['#e3b341',5]:['#90a4b6',2.5];
+  let dots='';
+  s.forEach(p=>{ if(p.ret==null)return; const c=col(p),x=X(ts(p.date)),y=Y(p.ret);
+    const tip=`${p.date}　${p.ret>=0?'+':''}${p.ret}%　${p.type}${(p.met&&p.met.length)?' ['+p.met.join('+')+']':''}`;
+    dots+=`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${c[1]}" fill="${c[0]}"><title>${tip}</title></circle>`; });
+  const y0=Y(0);
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="xMidYMid meet" style="min-width:560px">`
+    +yticks
+    +`<line x1="${L}" y1="${y0.toFixed(1)}" x2="${W-R}" y2="${y0.toFixed(1)}" stroke="#5a6b7a" stroke-width="1" stroke-dasharray="4 3"/>`
+    +`<path d="${path}" fill="none" stroke="#4493f8" stroke-width="1.6"/>`
+    +dots
+    +`<text x="${L}" y="${H-8}" fill="#90a4b6" font-size="11">${s[0].date}</text>`
+    +`<text x="${W-R}" y="${H-8}" fill="#90a4b6" font-size="11" text-anchor="end">${s[s.length-1].date}</text>`
+    +`</svg>`;
 }
 
 $('#go').addEventListener('click', login);
@@ -168,6 +237,8 @@ $('#p').addEventListener('keydown', e=>{ if(e.key==='Enter') login(); });
 
 // 同分頁內重整免重登（關閉分頁即清，較安全）
 window.addEventListener('load', ()=>{
+  const ru=localStorage.getItem('an_remember_u');
+  if(ru){ $('#u').value=ru; $('#remember').checked=true; $('#p').focus(); }
   const u=sessionStorage.getItem('an_u'), p=sessionStorage.getItem('an_p');
   if(u&&p){ $('#u').value=u; $('#p').value=p; login(); }
 });
