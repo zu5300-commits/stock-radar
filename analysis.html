@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>選股雷達 · 績效規則分析</title>
+<style>
+  :root{ --bg:#0f1720; --card:#16212e; --line:#26384a; --fg:#e7eef5; --mut:#90a4b6;
+         --good:#3fb950; --warn:#d29922; --bad:#f85149; --accent:#4493f8; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--bg); color:var(--fg);
+        font-family:-apple-system,"Segoe UI","Microsoft JhengHei",sans-serif; font-size:15px; line-height:1.5; }
+  .wrap{ max-width:920px; margin:0 auto; padding:16px; }
+  h1{ font-size:19px; margin:4px 0 2px; }
+  .sub{ color:var(--mut); font-size:13px; margin-bottom:14px; }
+  .card{ background:var(--card); border:1px solid var(--line); border-radius:12px;
+         padding:14px 16px; margin:12px 0; }
+  .card h2{ font-size:15px; margin:0 0 10px; color:var(--accent); }
+  label{ display:block; font-size:13px; color:var(--mut); margin:10px 0 4px; }
+  input{ width:100%; padding:11px 12px; border-radius:9px; border:1px solid var(--line);
+         background:#0c1520; color:var(--fg); font-size:16px; }
+  button{ width:100%; margin-top:14px; padding:12px; border:0; border-radius:9px;
+          background:var(--accent); color:#fff; font-size:16px; font-weight:600; cursor:pointer; }
+  button:disabled{ opacity:.5; }
+  .err{ color:var(--bad); font-size:13px; margin-top:10px; min-height:18px; }
+  table{ width:100%; border-collapse:collapse; font-size:13px; }
+  th,td{ padding:6px 8px; text-align:right; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th:first-child,td:first-child{ text-align:left; position:sticky; left:0; background:var(--card); }
+  th{ color:var(--mut); font-weight:600; }
+  .scroll{ overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .pos{ color:var(--good); } .neg{ color:var(--bad); } .zero{ color:var(--mut); }
+  .pill{ display:inline-block; font-size:11px; padding:1px 7px; border-radius:99px;
+         background:#1f2d3d; color:var(--mut); }
+  .note{ color:var(--mut); font-size:12px; line-height:1.6; }
+  .big{ font-size:22px; font-weight:700; }
+  .hide{ display:none; }
+  .findings li{ margin:6px 0; }
+  .topline{ display:flex; gap:14px; flex-wrap:wrap; align-items:baseline; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- 登入 -->
+  <div id="login" class="card" style="max-width:380px;margin:48px auto;">
+    <h1>選股雷達 · 績效規則分析</h1>
+    <div class="sub">此頁含選股研究內容，需帳密登入。</div>
+    <label>帳號</label>
+    <input id="u" autocomplete="username" autocapitalize="off">
+    <label>密碼</label>
+    <input id="p" type="password" autocomplete="current-password">
+    <button id="go">登入</button>
+    <div id="err" class="err"></div>
+  </div>
+
+  <!-- 分析 -->
+  <div id="report" class="hide"></div>
+
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const fmtPct = v => (v==null ? '—' : (v>=0?'+':'') + v.toFixed(0) + '%');
+const cls = v => v==null ? 'zero' : v>0 ? 'pos' : v<0 ? 'neg' : 'zero';
+const avg = a => a.length ? a.reduce((x,y)=>x+y,0)/a.length : 0;
+const median = a => { if(!a.length) return 0; const s=[...a].sort((x,y)=>x-y); return s[Math.floor(s.length/2)]; };
+
+async function login(){
+  const u=$('#u').value.trim(), p=$('#p').value;
+  $('#go').disabled=true; $('#err').textContent='';
+  try{
+    const r = await fetch('/analysis/data',{method:'POST',headers:{'Content-Type':'application/json'},
+              body:JSON.stringify({user:u,pwd:p})});
+    if(r.status===401){ $('#err').textContent='帳號或密碼錯誤'; $('#go').disabled=false; return; }
+    const j = await r.json();
+    if(!j.ok){ $('#err').textContent='讀取失敗：'+(j.error||'未知'); $('#go').disabled=false; return; }
+    sessionStorage.setItem('an_u',u); sessionStorage.setItem('an_p',p);
+    render(j);
+  }catch(e){ $('#err').textContent='連線失敗：'+e.message; $('#go').disabled=false; }
+}
+
+function xtab(rows, label, keyFn, order){
+  const g={};
+  rows.forEach(r=>{ const k=keyFn(r); (g[k]=g[k]||[]).push(r.maxRet); });
+  let keys=Object.keys(g); keys.sort(order||((a,b)=>a.localeCompare(b)));
+  let body=keys.map(k=>{
+    const a=g[k];
+    return `<tr><td>${k}</td><td>${a.length}</td><td class="${cls(avg(a))}">${fmtPct(avg(a))}</td>
+            <td class="${cls(median(a))}">${fmtPct(median(a))}</td><td class="${cls(Math.max(...a))}">${fmtPct(Math.max(...a))}</td></tr>`;
+  }).join('');
+  return `<div class="card"><h2>${label}</h2><div class="scroll"><table>
+    <tr><th>分組</th><th>檔數</th><th>平均</th><th>中位</th><th>最佳</th></tr>${body}</table></div></div>`;
+}
+
+function render(j){
+  $('#login').classList.add('hide');
+  const rep=$('#report'); rep.classList.remove('hide');
+  const rows=j.rows;
+  const base=j.base0050;
+
+  // 報酬分布
+  const buckets=[[200,1e9,'+200%↑'],[100,200,'+100~200%'],[50,100,'+50~100%'],
+    [30,50,'+30~50%'],[15,30,'+15~30%'],[5,15,'+5~15%'],[0,5,'0~+5%'],[-1e9,0,'負報酬']];
+  let distRows=buckets.map(([lo,hi,lab])=>{
+    const g=rows.filter(r=>r.maxRet>=lo&&r.maxRet<hi);
+    if(!g.length) return '';
+    return `<tr><td>${lab}</td><td>${g.length}</td><td style="text-align:left;color:var(--mut)">${g.map(r=>r.name).join('、')}</td></tr>`;
+  }).join('');
+
+  // 明細表
+  const detail=rows.map(r=>`<tr>
+    <td>${r.name}<br><span class="pill">${r.code}</span></td>
+    <td>${r.entryMet}</td>
+    <td>${r.everCount}種<br><span class="note">${r.everStrats}</span></td>
+    <td>${r.windEntries}</td>
+    <td>${r.windHoldDays==null?'—':r.windHoldDays+'天'}</td>
+    <td>${r.maxStars}★</td>
+    <td>${r.daysToPeak==null?'—':r.daysToPeak+'天'}</td>
+    <td>${r.snaps}</td>
+    <td class="${cls(r.maxRet)}">${fmtPct(r.maxRet)}</td>
+    <td class="${cls(r.excess)}">${fmtPct(r.excess)}</td>
+  </tr>`).join('');
+
+  rep.innerHTML = `
+    <h1>選股雷達 · 績效規則分析</h1>
+    <div class="sub topline">
+      <span>樣本 <b class="big">${j.count}</b> 檔</span>
+      <span>大盤參考線 0050：<b class="${cls(base)}">${fmtPct(base)}</b>（超額報酬 = 個股 − 此線，近似）</span>
+    </div>
+
+    <div class="card findings">
+      <h2>重點規律（探索性，非投資建議）</h2>
+      <ul>
+        <li><b>進入風口次數越多 ≠ 績效越好</b>：大贏家多數只進過一次風口。</li>
+        <li><b>收錄後「多久觸頂」最關鍵</b>：一收錄就立刻見頂回落的多為弱勢；撐得住、慢慢創高的才是真標的（看下方「觸頂天數」分組）。</li>
+        <li><b>策略別</b>：rd（研發/殖利率）穩定度通常優於 wind（風口，大樂透型）與 buyup。</li>
+        <li><b>同時入選多策略</b>：以「生涯曾分別命中幾種策略」衡量（見明細「曾命中」欄）。</li>
+      </ul>
+    </div>
+
+    <div class="card"><h2>報酬分布（收錄價 → 軌跡最高價）</h2>
+      <div class="scroll"><table><tr><th>報酬區間</th><th>檔數</th><th style="text-align:left">標的</th></tr>${distRows}</table></div></div>
+
+    ${xtab(rows,'① 進入風口次數 vs 報酬', r=>'風口'+r.windEntries+'次', (a,b)=>parseInt(a.replace(/\\D/g,''))-parseInt(b.replace(/\\D/g,'')))}
+    ${xtab(rows,'② 收錄策略別 vs 報酬', r=>'收錄='+r.entryMet)}
+    ${xtab(rows,'③ 生涯曾命中策略種數 vs 報酬', r=>r.everCount+'種策略')}
+    ${xtab(rows,'④ 漲完前最高星級 vs 報酬', r=>r.maxStars+'星')}
+    ${xtab(rows,'⑤ 收錄到觸頂天數 vs 報酬', r=>{const d=r.daysToPeak; return d==null?'未知':d<=7?'≤7天':d<=21?'8~21天':d<=45?'22~45天':'>45天';})}
+    ${xtab(rows,'⑥ 風口持續天數 vs 報酬（近似）', r=>{const d=r.windHoldDays; return d==null?'無風口/未知':d<=3?'≤3天':d<=10?'4~10天':'>10天';})}
+
+    <div class="card"><h2>各檔明細（漲完前累積特徵）</h2>
+      <div class="scroll"><table>
+        <tr><th>標的</th><th>收錄策略</th><th>曾命中</th><th>風口次數</th><th>風口持續</th><th>最高星</th><th>觸頂天數</th><th>快照數</th><th>最大報酬</th><th>超額(vs0050)</th></tr>
+        ${detail}
+      </table></div>
+    </div>
+
+    <div class="card note">
+      ⚠️ <b>限制</b>：① 樣本僅 ${j.count} 檔、快照不規則（靠手動「抓取行情」生成，時間軸有缺）→ 這是<b>探索性規律，非嚴謹回測</b>。
+      ② 績效用「收錄→軌跡最高」＝最大潛在報酬（假設賣在最高，實際難達到）。
+      ③ 0050 為單一參考線、非逐檔同期對照（近似）。④ <b>本頁僅供研究，非投資建議。</b>
+    </div>
+  `;
+}
+
+$('#go').addEventListener('click', login);
+$('#p').addEventListener('keydown', e=>{ if(e.key==='Enter') login(); });
+
+// 同分頁內重整免重登（關閉分頁即清，較安全）
+window.addEventListener('load', ()=>{
+  const u=sessionStorage.getItem('an_u'), p=sessionStorage.getItem('an_p');
+  if(u&&p){ $('#u').value=u; $('#p').value=p; login(); }
+});
+</script>
+</body>
+</html>

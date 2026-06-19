@@ -1852,5 +1852,117 @@ def cron_snapshot():
     return jsonify({"ok": True, "added": added, "total": len(wl), "date": today})
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 分析頁（/analysis）— 收錄股票「初期特徵 → 績效」規則分析，帳密保護
+#   定錨：績效＝收錄價→軌跡最高價；初期特徵＝只取「漲到最高那天(含)之前」累積（杜絕結果論）；
+#         0050 當大盤參考線算超額報酬(近似)；「同時入選2/3種」＝生涯曾分別命中過的策略種數。
+#   安全：帳號/密碼走環境變數 ANALYSIS_USER / ANALYSIS_PASS（public repo 不寫死，龍哥自己填）。
+#   對主功能零干擾：獨立路由、獨立頁面、只「讀」現有 wl，不寫任何資料。
+# ──────────────────────────────────────────────────────────────────────────────
+import hmac as _hmac
+
+ANALYSIS_TOKEN = os.environ.get("ANALYSIS_TOKEN", "34bc560c").strip()  # 要分析哪個同步碼的清單
+
+
+def _analysis_auth_ok(user, pwd):
+    """比對環境變數帳密。沒設環境變數 → 一律拒絕（不開天窗）。compare_digest 防 timing。"""
+    exp_u = os.environ.get("ANALYSIS_USER", "")
+    exp_p = os.environ.get("ANALYSIS_PASS", "")
+    if not exp_u or not exp_p:
+        return False
+    return (_hmac.compare_digest(str(user or ""), exp_u)
+            and _hmac.compare_digest(str(pwd or ""), exp_p))
+
+
+def _an_iso(s):
+    return s.get("iso", "") or ""
+
+
+def _an_daydiff(d1, d2):
+    try:
+        a = datetime.strptime(str(d1)[:10], "%Y-%m-%d")
+        b = datetime.strptime(str(d2)[:10], "%Y-%m-%d")
+        return (b - a).days
+    except Exception:
+        return None
+
+
+def _analyze_one(code, w):
+    """單檔：算『漲完前累積特徵』+ 績效。回 dict 或 None（無收錄價無法算報酬）。"""
+    snaps = sorted(w.get("snapshots", []) or [], key=_an_iso)
+    if not snaps:
+        return None
+    entry = next((x for x in snaps if x.get("type") == "entry"), snaps[0])
+    p0 = entry.get("price")
+    if not p0 or p0 <= 0:
+        return None
+    pmax, max_idx = p0, 0
+    for i, x in enumerate(snaps):
+        p = x.get("price")
+        if isinstance(p, (int, float)) and p > pmax:
+            pmax, max_idx = p, i
+    max_ret = (pmax / p0 - 1) * 100.0
+    pre = snaps[:max_idx + 1]                       # 初期＝漲到頂(含)之前
+    met_sets = [(x.get("met") or []) for x in pre]
+    ever = sorted(set([m for ms in met_sets for m in ms]))
+    max_wind_cycle = max([0] + [int(x.get("windCycle") or 0) for x in pre])
+    wind_entries = (1 if "wind" in ever else 0) + max_wind_cycle   # 進入風口次數
+    max_stars = max([1] + [int(x.get("stars") or 1) for x in pre])
+    days_to_peak = _an_daydiff(entry.get("date", ""), snaps[max_idx].get("date", ""))
+    # 風口持續天數（近似，快照不規則）：第一筆含 wind → 之後第一筆 wind-lost；無則到 pre 末筆
+    wind_hold = None
+    first_wind = next((x for x in pre if "wind" in (x.get("met") or [])), None)
+    if first_wind:
+        lost = next((x for x in pre if x.get("type") == "wind-lost"
+                     and _an_iso(x) > _an_iso(first_wind)), None)
+        end = lost or pre[-1]
+        wind_hold = _an_daydiff(first_wind.get("date", ""), end.get("date", ""))
+    return {
+        "code": code, "name": w.get("name", code),
+        "entryMet": "+".join(entry.get("met") or []) or "-",
+        "everStrats": "+".join(ever) or "-",
+        "everCount": len(ever),                     # 生涯曾分別命中幾種策略
+        "windEntries": wind_entries,
+        "maxWindCycle": max_wind_cycle,
+        "windHoldDays": wind_hold,
+        "maxStars": max_stars,
+        "daysToPeak": days_to_peak,
+        "snaps": len(snaps),
+        "p0": p0, "pmax": pmax,
+        "maxRet": round(max_ret, 1),
+    }
+
+
+def _compute_analysis(token):
+    _ensure_loaded(token)
+    with _sync_lock:
+        entry = _sync_store.get(token) or {}
+    wl = ((entry.get("data") or {}).get("wl") or {})
+    recs = [r for r in (_analyze_one(c, w) for c, w in wl.items()) if r]
+    recs.sort(key=lambda r: r["maxRet"], reverse=True)
+    base0050 = next((r["maxRet"] for r in recs if r["code"] == "0050"), None)
+    for r in recs:
+        r["excess"] = (round(r["maxRet"] - base0050, 1) if base0050 is not None else None)
+    return {"token": token, "count": len(recs), "base0050": base0050, "rows": recs}
+
+
+@app.route("/analysis")
+def analysis_page():
+    base = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(base, "analysis.html"), encoding="utf-8") as f:
+        return f.read()
+
+
+@app.route("/analysis/data", methods=["POST"])
+def analysis_data():
+    body = request.get_json(force=True) or {}
+    if not _analysis_auth_ok(body.get("user"), body.get("pwd")):
+        return jsonify({"ok": False, "error": "auth"}), 401
+    try:
+        return jsonify({"ok": True, **_compute_analysis(ANALYSIS_TOKEN)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": (str(e) or repr(e) or type(e).__name__)})
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
