@@ -187,7 +187,10 @@ function render(j){
   // 軌跡圖綁定：預設顯示報酬最高那檔，可下拉切換
   window._anRows = rows;
   const pick = document.getElementById('chartPick');
-  if(pick){ pick.addEventListener('change', ()=>drawChart(pick.value)); drawChart(rows[0].code); }
+  if(pick){ pick.addEventListener('change', ()=>drawChart(pick.value));
+    let demo=rows[0],mx=-1;   // 預設顯示「風口停歇/升星」事件最多那檔，事件標記一目了然
+    rows.forEach(r=>{const ev=(r.series||[]).filter(p=>p.type==='wind-lost'||p.type==='wind-retrigger').length; if(ev>mx){mx=ev;demo=r;}});
+    pick.value=demo.code; drawChart(demo.code); }
 }
 
 function drawChart(code){
@@ -216,17 +219,34 @@ function buildChartSVG(r){
   for(let k=0;k<=2;k++){ const v=ymin+(ymax-ymin)*k/2, y=Y(v);
     yticks+=`<line x1="${L}" y1="${y.toFixed(1)}" x2="${W-R}" y2="${y.toFixed(1)}" stroke="#26384a" stroke-width="0.5"/>`
           +`<text x="4" y="${(y+4).toFixed(1)}" fill="#90a4b6" font-size="11">${v.toFixed(0)}%</text>`; }
-  const col=p=>p.type==='entry'?['#4493f8',5]:p.type==='wind-lost'?['#f85149',4]:p.type==='wind-retrigger'?['#e3b341',5]:['#90a4b6',2.5];
-  let dots='';
-  s.forEach(p=>{ if(p.ret==null)return; const c=col(p),x=X(ts(p.date)),y=Y(p.ret);
-    const tip=`${p.date}　${p.ret>=0?'+':''}${p.ret}%　${p.type}${(p.met&&p.met.length)?' ['+p.met.join('+')+']':''}`;
-    dots+=`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${c[1]}" fill="${c[0]}"><title>${tip}</title></circle>`; });
+  // 事件標記：price=null 的事件(風口停歇)用「時間上最近的有效報酬」當 y，才畫得出來
+  const validIdx=s.map((p,i)=>p.ret!=null?i:-1).filter(i=>i>=0);
+  const yOf=i=>{ if(s[i].ret!=null) return Y(s[i].ret);
+    let best=validIdx[0],bd=1e9; validIdx.forEach(vi=>{const d=Math.abs(vi-i);if(d<bd){bd=d;best=vi;}});
+    return Y(best!=null?s[best].ret:0); };
+  let marks='';
+  s.forEach((p,i)=>{
+    const x=X(ts(p.date)),y=yOf(i);
+    const tip=`${p.date}　${p.ret!=null?((p.ret>=0?'+':'')+p.ret+'%　'):''}${p.type}${(p.met&&p.met.length)?' ['+p.met.join('+')+']':''}`;
+    if(p.type==='entry'){
+      marks+=`<circle cx='${x.toFixed(1)}' cy='${y.toFixed(1)}' r='5' fill='#4493f8'><title>${tip}</title></circle>`
+            +`<text x='${x.toFixed(1)}' y='${(y-9).toFixed(1)}' fill='#4493f8' font-size='10' text-anchor='middle'>收錄</text>`;
+    }else if(p.type==='wind-lost'){
+      marks+=`<polygon points='${(x-5).toFixed(1)},${(y-5).toFixed(1)} ${(x+5).toFixed(1)},${(y-5).toFixed(1)} ${x.toFixed(1)},${(y+5).toFixed(1)}' fill='#f85149'><title>${tip}</title></polygon>`
+            +`<text x='${x.toFixed(1)}' y='${(y+19).toFixed(1)}' fill='#f85149' font-size='10' text-anchor='middle'>停歇</text>`;
+    }else if(p.type==='wind-retrigger'){
+      marks+=`<rect x='${(x-4.5).toFixed(1)}' y='${(y-4.5).toFixed(1)}' width='9' height='9' transform='rotate(45 ${x.toFixed(1)} ${y.toFixed(1)})' fill='#e3b341'><title>${tip}</title></rect>`
+            +`<text x='${x.toFixed(1)}' y='${(y-9).toFixed(1)}' fill='#e3b341' font-size='10' text-anchor='middle'>升${p.stars}星</text>`;
+    }else if(p.ret!=null){
+      marks+=`<circle cx='${x.toFixed(1)}' cy='${y.toFixed(1)}' r='2.5' fill='#90a4b6'><title>${tip}</title></circle>`;
+    }
+  });
   const y0=Y(0);
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="xMidYMid meet" style="min-width:560px">`
     +yticks
     +`<line x1="${L}" y1="${y0.toFixed(1)}" x2="${W-R}" y2="${y0.toFixed(1)}" stroke="#5a6b7a" stroke-width="1" stroke-dasharray="4 3"/>`
     +`<path d="${path}" fill="none" stroke="#4493f8" stroke-width="1.6"/>`
-    +dots
+    +marks
     +`<text x="${L}" y="${H-8}" fill="#90a4b6" font-size="11">${s[0].date}</text>`
     +`<text x="${W-R}" y="${H-8}" fill="#90a4b6" font-size="11" text-anchor="end">${s[s.length-1].date}</text>`
     +`</svg>`;
