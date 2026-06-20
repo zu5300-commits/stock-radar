@@ -2111,7 +2111,16 @@ def cron_holders():
 
     data_date, holders = _fetch_tdcc_holders()
     if not data_date or not holders:
-        return jsonify({"ok": False, "error": "TDCC 抓取/解析失敗"})
+        # 回 502（非 2xx）讓 GitHub Actions/健康檢查抓得到，不再「ok:false 卻被當成功」無聲漏。
+        return jsonify({"ok": False, "error": "TDCC 抓取/解析失敗"}), 502
+
+    # 🛡️ 健康檢查：擋截斷/殘缺 CSV 存進永久檔（冪等會把殘缺週鎖死、之後不重抓）。
+    #   2330 台積電在集保分散表必然存在；全市場正常 ~3000-4000 檔，<1000 顯然截斷。
+    #   放在 force/冪等之前——任何情況都不准存殘缺資料毒化好資料（沿用 inst _SANITY 教訓）。
+    if "2330" not in holders or len(holders) < 1000:
+        msg = f"資料殘缺(stocks={len(holders)}, has2330={'2330' in holders})，不存避免毒化"
+        print(f"[HOLDERS] reject: {msg}")
+        return jsonify({"ok": False, "error": msg, "date": data_date}), 502
 
     if not force and _r2_get_holders(data_date) is not None:
         return jsonify({"ok": True, "skipped": f"already have {data_date}", "date": data_date,
