@@ -159,6 +159,14 @@ function render(j){
         <span><i class="dot" style="background:#f85149"></i>風口停歇</span>
         <span><i class="dot" style="background:#e3b341"></i>升星/重觸發</span>
       </div>
+      <h2 style="margin-top:18px">三大法人買賣超（同期，單位：張）</h2>
+      <div class="chartwrap"><div id="instBox"><div class="note">選個股後載入…</div></div></div>
+      <div class="legend">
+        <span><i class="dot" style="background:#4493f8"></i>外資</span>
+        <span><i class="dot" style="background:#e3b341"></i>投信</span>
+        <span><i class="dot" style="background:#3fb950"></i>自營商</span>
+        <span style="color:var(--txt2)">正＝買超(上) / 負＝賣超(下)</span>
+      </div>
     </div>
 
     <div class="card"><h2>報酬分布（收錄價 → 軌跡最高價）</h2>
@@ -198,6 +206,61 @@ function drawChart(code){
   const box=document.getElementById('chartBox');
   if(!r||!box) return;
   box.innerHTML=buildChartSVG(r);
+  drawInst(code, r);          // 連動：軌跡圖下方買賣超副圖
+}
+
+// ── 三大法人買賣超副圖（與軌跡圖共用時間 X 軸對齊）──
+async function drawInst(code, r){
+  const ibox=document.getElementById('instBox');
+  if(!ibox) return;
+  ibox.innerHTML='<div class="note">三大法人買賣超載入中…</div>';
+  const s=(r.series||[]).filter(p=>p.date);
+  let xmin=null,xmax=null;
+  if(s.length){ const xs=s.map(p=>new Date(String(p.date).slice(0,10)).getTime());
+    xmin=Math.min(...xs); xmax=Math.max(...xs); }
+  try{
+    const res=await fetch('/inst/series?code='+encodeURIComponent(code)+'&days=60',{signal:AbortSignal.timeout(30000)});
+    const j=await res.json();
+    if(!j.ok||!j.series||!j.series.length){
+      ibox.innerHTML='<div class="note">此檔尚無三大法人資料（每日 18:00 排程逐日累積；自營商自上線日起才有）。</div>'; return; }
+    ibox.innerHTML=buildInstSVG(j.series, xmin, xmax);
+  }catch(e){ ibox.innerHTML='<div class="note">三大法人資料載入失敗，稍後再試。</div>'; }
+}
+
+function buildInstSVG(series, xmin, xmax){
+  const ts=d=>new Date(String(d).slice(0,10)).getTime();
+  let s=(series||[]).filter(p=>p.date);
+  // 對齊軌跡圖時間範圍（±1 日緩衝）
+  if(xmin!=null&&xmax!=null) s=s.filter(p=>{const t=ts(p.date); return t>=xmin-864e5 && t<=xmax+864e5;});
+  if(!s.length) return '<div class="note">此區間尚無三大法人資料。</div>';
+  const W=700,L=44,R=12,H=150,T=10,Bm=20;
+  let lo=xmin,hi=xmax;
+  if(lo==null||hi==null){ const xs=s.map(p=>ts(p.date)); lo=Math.min(...xs); hi=Math.max(...xs); }
+  const X=t=>L+(hi===lo?0.5:(t-lo)/(hi-lo))*(W-L-R);
+  const mid=T+(H-T-Bm)/2, half=(H-T-Bm)/2-4;
+  const lot=v=>v==null?null:v/1000;     // 股 → 張
+  let maxAbs=1;
+  s.forEach(p=>['f','t','d'].forEach(k=>{const v=lot(p[k]); if(v!=null) maxAbs=Math.max(maxAbs,Math.abs(v));}));
+  const Yh=v=>(Math.abs(v)/maxAbs)*half;
+  const cols={f:'#4493f8',t:'#e3b341',d:'#3fb950'}, nm={f:'外資',t:'投信',d:'自營商'}, order=['f','t','d'];
+  const bw=Math.max(1.5, Math.min(5, (W-L-R)/Math.max(s.length,1)/4));
+  let bars='';
+  s.forEach(p=>{ const x=X(ts(p.date));
+    order.forEach((k,gi)=>{ const v=lot(p[k]); if(v==null) return;
+      const bx=x+(gi-1)*bw-bw/2, h=Math.max(0.6,Yh(v)), by=v>=0?mid-h:mid;
+      const tip=`${p.date} ${nm[k]} ${v>=0?'+':''}${Math.round(v)}張`;
+      bars+=`<rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" fill="${cols[k]}"><title>${tip}</title></rect>`;
+    });
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="xMidYMid meet" style="min-width:560px">`
+    +`<line x1="${L}" y1="${mid.toFixed(1)}" x2="${W-R}" y2="${mid.toFixed(1)}" stroke="#5a6b7a" stroke-width="1"/>`
+    +`<text x="4" y="${(T+8).toFixed(1)}" fill="#90a4b6" font-size="10">買超</text>`
+    +`<text x="4" y="${(mid+half+8).toFixed(1)}" fill="#90a4b6" font-size="10">賣超</text>`
+    +`<text x="${(W-R).toFixed(1)}" y="${(T+8).toFixed(1)}" fill="#6e7d8a" font-size="9" text-anchor="end">滿格±${Math.round(maxAbs)}張</text>`
+    +bars
+    +`<text x="${L}" y="${(H-6).toFixed(1)}" fill="#90a4b6" font-size="11">${s[0].date}</text>`
+    +`<text x="${(W-R).toFixed(1)}" y="${(H-6).toFixed(1)}" fill="#90a4b6" font-size="11" text-anchor="end">${s[s.length-1].date}</text>`
+    +`</svg>`;
 }
 
 function buildChartSVG(r){

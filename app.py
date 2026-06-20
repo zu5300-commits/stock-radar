@@ -435,7 +435,7 @@ def _fetch_t86_day(date_str):
         fields = resp.get("fields", [])
         print(f"[T86-TWSE] {date_str} rows={len(rows)}")
 
-        # 自動偵測欄位索引
+        # 自動偵測欄位索引（外資/投信維持原行為不動，只新增自營商）
         f_idx, t_idx = 4, 10
         for i, f in enumerate(fields):
             if "外" in f and "買賣超" in f and "自營" not in f and i < 8:
@@ -449,7 +449,11 @@ def _fetch_t86_day(date_str):
                 code = str(row[0]).strip()
                 if not code or not code[0].isdigit():
                     continue
-                day[code] = (to_int(row[f_idx]), to_int(row[t_idx]))
+                # 自營商買賣超合計：T86 列長不一致——標準 19 欄在 idx 11；少數精簡 16 欄
+                # 版面（無自營商避險細項）自營商淨在 idx 14（[12]-[13]=[14] 已實證 177/177）。
+                d_idx = 14 if len(row) <= 16 else 11
+                d_net = to_int(row[d_idx]) if len(row) > d_idx else 0
+                day[code] = (to_int(row[f_idx]), to_int(row[t_idx]), d_net)
             except (IndexError, Exception):
                 continue
         return date_str, day
@@ -505,7 +509,9 @@ def _fetch_tpex_inst_day(date_str):
         tables = resp.get("tables", [])
         if tables:
             fields = tables[0].get("fields", [])
-        f_idx, t_idx = 4, 13  # TPEX 預設
+        # TPEX 欄位無區別名稱（皆「買賣超股數」），故用固定索引：
+        #   f=[4]外資(不含自營) t=[13]投信 d=[22]自營商合計（=自行買賣[16]+避險[19]）
+        f_idx, t_idx, d_idx = 4, 13, 22
         for i, f in enumerate(fields):
             if "外" in f and "買賣超" in f and "自營" not in f and "合計" not in f and i < 8:
                 f_idx = i
@@ -520,7 +526,8 @@ def _fetch_tpex_inst_day(date_str):
                     continue
                 f_net = to_int(row[f_idx])
                 t_net = to_int(row[t_idx])
-                day[code] = (f_net, t_net)
+                d_net = to_int(row[d_idx]) if len(row) > d_idx else 0
+                day[code] = (f_net, t_net, d_net)
             except (IndexError, Exception):
                 continue
         return date_str, day
@@ -1961,6 +1968,54 @@ def cron_snapshot():
     _write_health("ok", now, date=today, added=added, total=len(wl))
     print(f"[CRON] {token}: snapshot done, +{added} new, ~{daily_updated} daily, total {len(wl)}")
     return jsonify({"ok": True, "added": added, "daily": daily_updated, "total": len(wl), "date": today})
+
+
+@app.route("/inst/series")
+def inst_series():
+    """個股近 N 個交易日三大法人買賣超 {date,f,t,d}（股數，正=買超/負=賣超）。
+    只『讀』R2 已存歷史，不觸發任何抓取（快、不會引發冷啟動超時）。
+    供分析頁軌跡圖下方的買賣超副圖用。
+    ⚠️ 自營商(d) 自 2026-06 補抓上線日起才有；更早的日子 R2 只存 [f,t]，d 回 None。"""
+    code = str(request.args.get("code", "")).strip()[:8]
+    if not code or not code[0].isdigit():
+        return jsonify({"ok": False, "error": "bad code"})
+    try:
+        days = int(request.args.get("days", 60))
+    except (ValueError, TypeError):
+        days = 60
+    days = max(5, min(days, 250))
+
+    ck = f"instseries:{code}:{days}"
+    cached = get_cache(ck, ttl=1800)
+    if cached is not None:
+        return jsonify(cached)
+
+    dates = recent_weekdays(days)             # 新→舊（YYYYMMDD）
+
+    def _load(d):
+        day = _r2_get_day(d)                  # 沒有就 None
+        if day and code in day:
+            return (d, day[code])
+        return None
+
+    pairs = []
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for r in ex.map(_load, dates):
+            if r:
+                pairs.append(r)
+    pairs.sort(key=lambda x: x[0])            # 舊→新
+
+    series = []
+    for d, rec in pairs:
+        fmt = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+        f  = rec[0] if len(rec) > 0 else None
+        t  = rec[1] if len(rec) > 1 else None
+        dd = rec[2] if len(rec) > 2 else None  # 舊 2 元素檔無自營商
+        series.append({"date": fmt, "f": f, "t": t, "d": dd})
+
+    out = {"ok": True, "code": code, "days": days, "series": series}
+    set_cache(ck, out)
+    return jsonify(out)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
