@@ -1,0 +1,30 @@
+name: 選股雷達每週集保大戶
+
+# 抓 TDCC 集保戶股權分散表(大戶持股比率)存 R2，逐週累積歷史。
+# TDCC 週更(資料為上週五結算)，排雙日確保抓到新週；/cron/holders 冪等(該週已存就跳過)，重複無害。
+# cron 用 UTC。週六 09:00 UTC=台灣週六 17:00；週三 09:00 UTC=台灣週三 17:00。
+on:
+  schedule:
+    - cron: '0 9 * * 6'
+    - cron: '0 9 * * 3'
+  workflow_dispatch:
+
+jobs:
+  holders:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 戳 /cron/holders(抓集保大戶→存 R2)
+        run: |
+          if [ -z "${{ secrets.RADAR_TOKEN }}" ]; then
+            echo "::error::缺少 RADAR_TOKEN secret"
+            exit 1
+          fi
+          echo "呼叫 cron/holders(Render 免費方案冷啟動可能需 ~50s)…"
+          code=$(curl -sS --max-time 180 -o resp.txt -w "%{http_code}" \
+            "https://stock-radar-jwws.onrender.com/cron/holders?token=${{ secrets.RADAR_TOKEN }}")
+          echo "HTTP $code"
+          echo "回應:"; cat resp.txt; echo ""
+          case "$code" in
+            2*) echo "✅ 觸發成功" ;;
+            *)  echo "::error::HTTP $code，觸發失敗"; exit 1 ;;
+          esac

@@ -167,6 +167,13 @@ function render(j){
         <span><i class="dot" style="background:#3fb950"></i>自營商</span>
         <span style="color:var(--txt2)">正＝買超(上) / 負＝賣超(下)</span>
       </div>
+      <h2 style="margin-top:18px">集保大戶持股比率（每週，%）</h2>
+      <div class="chartwrap"><div id="holdersBox"><div class="note">選個股後載入…</div></div></div>
+      <div class="legend">
+        <span><i class="dot" style="background:#2dd4bf"></i>≥400張</span>
+        <span><i class="dot" style="background:#a371f7"></i>千張大戶</span>
+        <span style="color:var(--txt2)">資料源：TDCC 集保；自上線日起逐週累積</span>
+      </div>
     </div>
 
     <div class="card"><h2>報酬分布（收錄價 → 軌跡最高價）</h2>
@@ -207,6 +214,60 @@ function drawChart(code){
   if(!r||!box) return;
   box.innerHTML=buildChartSVG(r);
   drawInst(code, r);          // 連動：軌跡圖下方買賣超副圖
+  drawHolders(code);          // 連動：集保大戶持股比率副圖
+}
+
+// ── 集保大戶持股比率副圖（每週趨勢線）──
+async function drawHolders(code){
+  const hbox=document.getElementById('holdersBox');
+  if(!hbox) return;
+  hbox.innerHTML='<div class="note">集保大戶資料載入中…</div>';
+  try{
+    const res=await fetch('/holders/series?code='+encodeURIComponent(code)+'&weeks=26',{signal:AbortSignal.timeout(30000)});
+    const j=await res.json();
+    if(!j.ok||!j.series||!j.series.length){
+      hbox.innerHTML='<div class="note">此檔尚無集保大戶資料（每週排程逐週累積；剛上線可能還沒有）。</div>'; return; }
+    hbox.innerHTML=buildHoldersSVG(j.series);
+  }catch(e){ hbox.innerHTML='<div class="note">集保大戶資料載入失敗，稍後再試。</div>'; }
+}
+
+function buildHoldersSVG(series){
+  const s=(series||[]).filter(p=>p.date&&(p.ge400!=null||p.ge1000!=null));
+  if(!s.length) return '<div class="note">此檔尚無集保大戶資料。</div>';
+  const W=700,L=44,R=12,H=170,T=14,Bm=24;
+  const ts=d=>new Date(String(d).slice(0,10)).getTime();
+  const xs=s.map(p=>ts(p.date)); let xmin=Math.min(...xs),xmax=Math.max(...xs);
+  const vals=[]; s.forEach(p=>{if(p.ge400!=null)vals.push(p.ge400); if(p.ge1000!=null)vals.push(p.ge1000);});
+  let ymin=Math.min(...vals),ymax=Math.max(...vals);
+  if(ymax===ymin){ymin-=1;ymax+=1;}
+  const pd=(ymax-ymin)*0.15; ymin=Math.max(0,ymin-pd); ymax=Math.min(100,ymax+pd);
+  const X=t=>L+(xmax===xmin?0.5:(t-xmin)/(xmax-xmin))*(W-L-R);
+  const Y=v=>T+(1-(v-ymin)/(ymax-ymin))*(H-T-Bm);
+  // y 格線
+  let yticks='';
+  for(let k=0;k<=2;k++){ const v=ymin+(ymax-ymin)*k/2, y=Y(v);
+    yticks+=`<line x1="${L}" y1="${y.toFixed(1)}" x2="${W-R}" y2="${y.toFixed(1)}" stroke="#26384a" stroke-width="0.5"/>`
+          +`<text x="4" y="${(y+4).toFixed(1)}" fill="#90a4b6" font-size="11">${v.toFixed(0)}%</text>`; }
+  // 兩條線
+  function lineFor(key,color){
+    const pts=s.filter(p=>p[key]!=null);
+    if(!pts.length) return '';
+    let path='',pen=false,dots='';
+    pts.forEach(p=>{ const x=X(ts(p.date)),y=Y(p[key]);
+      path+=(pen?'L':'M')+x.toFixed(1)+' '+y.toFixed(1)+' '; pen=true;
+      dots+=`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${pts.length<=2?3.5:2.5}" fill="${color}"><title>${p.date} ${key==='ge400'?'≥400張':'千張大戶'} ${p[key]}%</title></circle>`; });
+    const last=pts[pts.length-1], lx=X(ts(last.date)), ly=Y(last[key]);
+    const lbl=`<text x="${(lx-4).toFixed(1)}" y="${(ly-6).toFixed(1)}" fill="${color}" font-size="10" text-anchor="end">${last[key]}%</text>`;
+    return `<path d="${path}" fill="none" stroke="${color}" stroke-width="1.6"/>`+dots+lbl;
+  }
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="xMidYMid meet" style="min-width:560px">`
+    +yticks
+    +lineFor('ge400','#2dd4bf')
+    +lineFor('ge1000','#a371f7')
+    +`<text x="${L}" y="${(H-7).toFixed(1)}" fill="#90a4b6" font-size="11">${s[0].date}</text>`
+    +`<text x="${(W-R).toFixed(1)}" y="${(H-7).toFixed(1)}" fill="#90a4b6" font-size="11" text-anchor="end">${s[s.length-1].date}</text>`
+    +(s.length<2?`<text x="${(W/2).toFixed(1)}" y="${(H/2).toFixed(1)}" fill="#6e7d8a" font-size="11" text-anchor="middle">僅 1 週資料，趨勢線需多週累積</text>`:'')
+    +`</svg>`;
 }
 
 // ── 三大法人買賣超副圖（與軌跡圖共用時間 X 軸對齊）──

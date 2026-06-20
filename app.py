@@ -120,6 +120,34 @@ def _r2_put_day(date_str, day_data):
         print(f"[R2] put day failed {date_str}: {e}")
 
 
+# ── 集保大戶持股比率（TDCC，每週一檔）──────────────────────────────────────────
+def _r2_holders_key(date_str):
+    return f"holders/{date_str}.json"
+
+
+def _r2_get_holders(date_str):
+    """讀某週集保大戶資料 {code:[ge400,ge1000]}；沒有或失敗回 None"""
+    if not _r2:
+        return None
+    try:
+        obj = _r2.get_object(Bucket=R2_BUCKET, Key=_r2_holders_key(date_str))
+        return _json.loads(obj["Body"].read())
+    except Exception:
+        return None
+
+
+def _r2_put_holders(date_str, data):
+    """把某週集保大戶資料寫進 R2（永久存檔，逐週累積歷史）"""
+    if not _r2:
+        return
+    try:
+        _r2.put_object(Bucket=R2_BUCKET, Key=_r2_holders_key(date_str),
+                       Body=_json.dumps(data).encode("utf-8"),
+                       ContentType="application/json")
+    except Exception as e:
+        print(f"[R2] put holders failed {date_str}: {e}")
+
+
 def _ensure_loaded(token):
     """記憶體沒有此 token 時，從 R2 載回（主機冷啟動/重新部署後復原永久資料）"""
     with _sync_lock:
@@ -2014,6 +2042,133 @@ def inst_series():
         series.append({"date": fmt, "f": f, "t": t, "d": dd})
 
     out = {"ok": True, "code": code, "days": days, "series": series}
+    set_cache(ck, out)
+    return jsonify(out)
+
+
+# ── 集保大戶持股比率（TDCC 1-5）─────────────────────────────────────────────────
+_TDCC_URL = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5"
+
+
+def _fetch_tdcc_holders():
+    """抓集保戶股權分散表（TDCC，最新一週全市場）。
+    回傳 (data_date, {code:[ge400, ge1000]})；ge400=≥400張(級12~15)占比%、
+    ge1000=千張大戶(級15)占比%，皆用「股數/合計(級17)」算（比加總四捨五入%精準）。
+    🔴 代號欄有尾部空白，務必 strip。失敗回 (None, None)。"""
+    try:
+        r = req.get(_TDCC_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=60, verify=False)
+        r.encoding = "utf-8"
+        lines = r.text.splitlines()
+    except Exception as e:
+        print(f"[TDCC] fetch failed: {e}")
+        return None, None
+    if len(lines) < 2:
+        return None, None
+
+    agg = {}            # code -> [ge400_shares, l15_shares, total_shares]
+    data_date = None
+    for ln in lines[1:]:                       # 跳表頭
+        parts = ln.split(",")
+        if len(parts) < 6:
+            continue
+        try:
+            date   = parts[0].strip()
+            code   = parts[1].strip()          # 🔴 去尾部空白
+            lvl    = int(parts[2])
+            shares = int(parts[4]) if parts[4].strip() else 0
+        except (ValueError, IndexError):
+            continue
+        if not code or not code[0].isdigit():
+            continue
+        if data_date is None:
+            data_date = date
+        a = agg.setdefault(code, [0, 0, 0])
+        if 12 <= lvl <= 15:
+            a[0] += shares                     # ≥400張
+        if lvl == 15:
+            a[1] = shares                      # 千張大戶
+        if lvl == 17:
+            a[2] = shares                      # 合計
+    if not data_date or not agg:
+        return None, None
+
+    out = {}
+    for code, (ge400_s, l15_s, total_s) in agg.items():
+        if total_s <= 0:
+            continue
+        out[code] = [round(ge400_s / total_s * 100, 2), round(l15_s / total_s * 100, 2)]
+    return data_date, out
+
+
+@app.route("/cron/holders")
+def cron_holders():
+    """每週抓 TDCC 集保大戶持股比率，存進 R2(holders/<data_date>.json) 逐週累積歷史。
+    冪等：該週 data_date 已存就跳過（force=1 可強制覆寫）。用法 /cron/holders?token=同步碼"""
+    token = str(request.args.get("token", "")).strip()[:64]
+    if not token:
+        return jsonify({"ok": False, "error": "missing token"})
+    force = request.args.get("force", "") in ("1", "true", "yes")
+
+    data_date, holders = _fetch_tdcc_holders()
+    if not data_date or not holders:
+        return jsonify({"ok": False, "error": "TDCC 抓取/解析失敗"})
+
+    if not force and _r2_get_holders(data_date) is not None:
+        return jsonify({"ok": True, "skipped": f"already have {data_date}", "date": data_date,
+                        "stocks": len(holders)})
+
+    _r2_put_holders(data_date, holders)
+    print(f"[HOLDERS] stored {data_date}, {len(holders)} stocks")
+    return jsonify({"ok": True, "date": data_date, "stocks": len(holders)})
+
+
+@app.route("/holders/series")
+def holders_series():
+    """個股近 N 週集保大戶持股比率 {date,ge400,ge1000}（只讀 R2 歷史，不觸發抓取）。
+    供分析頁副圖。歷史自上線日起逐週累積（初期可能只 1 個點）。"""
+    code = str(request.args.get("code", "")).strip()[:8]
+    if not code or not code[0].isdigit():
+        return jsonify({"ok": False, "error": "bad code"})
+    try:
+        weeks = int(request.args.get("weeks", 26))
+    except (ValueError, TypeError):
+        weeks = 26
+    weeks = max(1, min(weeks, 104))
+
+    if not _r2:
+        return jsonify({"ok": True, "code": code, "series": []})
+
+    ck = f"holdersseries:{code}:{weeks}"
+    cached = get_cache(ck, ttl=3600)
+    if cached is not None:
+        return jsonify(cached)
+
+    # 列出 holders/ 下所有週檔（分頁抓完）
+    keys, tok = [], None
+    while True:
+        kw = {"Bucket": R2_BUCKET, "Prefix": "holders/"}
+        if tok:
+            kw["ContinuationToken"] = tok
+        resp = _r2.list_objects_v2(**kw)
+        for o in resp.get("Contents", []):
+            keys.append(o["Key"])
+        if resp.get("IsTruncated"):
+            tok = resp.get("NextContinuationToken")
+        else:
+            break
+    dates = sorted({m.group(1) for k in keys for m in [re.search(r"holders/(\d{8})\.json$", k)] if m})
+    dates = dates[-weeks:]
+
+    series = []
+    for d in dates:
+        h = _r2_get_holders(d)
+        if not h or code not in h:
+            continue
+        rec = h[code]
+        series.append({"date": f"{d[:4]}-{d[4:6]}-{d[6:8]}",
+                       "ge400": rec[0] if len(rec) > 0 else None,
+                       "ge1000": rec[1] if len(rec) > 1 else None})
+    out = {"ok": True, "code": code, "series": series}
     set_cache(ck, out)
     return jsonify(out)
 
