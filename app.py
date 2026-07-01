@@ -3,6 +3,8 @@ import requests as req
 import urllib3
 import re
 import os
+import csv
+import io
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
@@ -255,8 +257,39 @@ def recent_weekdays(n=30):
 
 # ── TWSE 上市股票每日行情 ────────────────────────────────────────────────────────
 
+def _twse_csv_rows(text):
+    """TWSE STOCK_DAY_ALL 2026-06 底起無視 response=json 一律回 CSV。
+    依表頭欄名對位轉回舊 JSON data 的列格式 [代號,名稱,成交股數,成交金額,開盤,最高,最低,收盤,漲跌]，
+    並回傳資料日期（民國7碼，取自「日期」欄）。CSV 無視 date 參數永遠回最新交易日，
+    日期一律以資料列為準，別信請求參數。"""
+    want = ["證券代號", "證券名稱", "成交股數", "成交金額",
+            "開盤價", "最高價", "最低價", "收盤價", "漲跌價差"]
+    idx = None
+    date_idx = -1
+    rows = []
+    data_date = ""
+    for cells in csv.reader(io.StringIO(text)):
+        if not cells:
+            continue
+        if idx is None:
+            if "證券代號" in cells:
+                try:
+                    idx = [cells.index(n) for n in want]
+                except ValueError:
+                    return [], ""
+                date_idx = cells.index("日期") if "日期" in cells else -1
+            continue
+        try:
+            rows.append([cells[i] for i in idx])
+        except IndexError:
+            continue
+        if not data_date and date_idx >= 0 and date_idx < len(cells):
+            data_date = cells[date_idx].strip()
+    return rows, data_date
+
+
 def fetch_twse_day(date_str):
-    """取得 TWSE 指定日期全部上市股票資料"""
+    """取得 TWSE 指定日期全部上市股票資料（JSON 與 CSV 回應都吃）"""
     urls = [
         "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL",
         "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL",
@@ -265,6 +298,13 @@ def fetch_twse_day(date_str):
         try:
             r = req.get(url, params={"response": "json", "date": date_str},
                         headers=TWSE_HEADERS, timeout=30, verify=False)
+            ctype = str(r.headers.get("Content-Type", "")).lower()
+            if "csv" in ctype or not r.text.lstrip().startswith("{"):
+                rows, data_date = _twse_csv_rows(r.text)
+                print(f"[TWSE] {url} date={date_str} format=csv rows={len(rows)} data_date={data_date}")
+                if rows:
+                    return rows, parse_twse_date(data_date or date_str)
+                continue
             resp = r.json()
             rows = resp.get("data", [])
             print(f"[TWSE] {url} date={date_str} stat={resp.get('stat','?')} rows={len(rows)}")
@@ -1243,24 +1283,23 @@ def debug_fm_datasets():
 
 @app.route("/debug-twse")
 def debug_twse():
+    """走正式的 fetch_twse_day（含 CSV fallback），部署後打這裡即驗證真程式路徑"""
     results = []
     for date_str in recent_weekdays(3):
-        for url in [
-            "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL",
-        ]:
-            try:
-                r = req.get(url, params={"response": "json", "date": date_str},
-                            headers=TWSE_HEADERS, timeout=20, verify=False)
-                resp = r.json()
-                rows = resp.get("data", [])
+        try:
+            found = fetch_twse_day(date_str)
+            if found:
+                rows, latest_date = found
                 results.append({
-                    "url": url, "date_param": date_str,
-                    "stat": resp.get("stat", "?"),
+                    "date_param": date_str,
+                    "latest_date": latest_date,
                     "row_count": len(rows),
-                    "sample": rows[:2] if rows else [],
+                    "sample": rows[:2],
                 })
-            except Exception as e:
-                results.append({"url": url, "date_param": date_str, "error": str(e)})
+            else:
+                results.append({"date_param": date_str, "result": "None"})
+        except Exception as e:
+            results.append({"date_param": date_str, "error": str(e)})
     return jsonify(results)
 
 
