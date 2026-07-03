@@ -15,7 +15,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 
-FM_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiV2luIiwiZW1haWwiOiJ6dTUzMDBAZ21haWwuY29tIn0.q5_lYazAnsTiNGKFdVNlIReL8Kq_FdwnkMd7IZKcPJI"
+FM_TOKEN = os.environ.get("FINMIND_TOKEN", "").strip()
+if not FM_TOKEN:
+    print("[WARN] FINMIND_TOKEN 環境變數未設定，FinMind 資料抓取將失敗")
 FM_BASE  = "https://api.finmindtrade.com/api/v4/data"
 
 TWSE_HEADERS = {
