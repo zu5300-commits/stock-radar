@@ -152,6 +152,56 @@ def _r2_put_holders(date_str, data):
         print(f"[R2] put holders failed {date_str}: {e}")
 
 
+# ── 基本面快取 R2 持久化（防免費主機重啟失憶：rd 訊號「沒資料」≠「不合格」）────────
+_FUND_RD_KEY     = "fundamentals/rd_data.json"
+_FUND_BWIBBU_KEY = "fundamentals/bwibbu.json"
+_FUND_TS_FMT     = "%Y-%m-%dT%H:%M:%S"
+
+
+def _r2_get_json(key):
+    """讀 R2 任意 JSON 物件；沒有或失敗回 None"""
+    if not _r2:
+        return None
+    try:
+        obj = _r2.get_object(Bucket=R2_BUCKET, Key=key)
+        return _json.loads(obj["Body"].read())
+    except Exception:
+        return None
+
+
+def _r2_put_json(key, data):
+    """寫 R2 任意 JSON 物件（失敗不影響主流程）"""
+    if not _r2:
+        return
+    try:
+        _r2.put_object(Bucket=R2_BUCKET, Key=key,
+                       Body=_json.dumps(data).encode("utf-8"),
+                       ContentType="application/json")
+    except Exception as e:
+        print(f"[R2] put json failed {key}: {e}")
+
+
+def _r2_delete(key):
+    """刪 R2 物件（供強制重抓用；失敗不影響主流程）"""
+    if not _r2:
+        return
+    try:
+        _r2.delete_object(Bucket=R2_BUCKET, Key=key)
+    except Exception as e:
+        print(f"[R2] delete failed {key}: {e}")
+
+
+def _fund_age_hours(persisted):
+    """持久化基本面資料的年齡（小時）；缺 ts / 格式不對回 None（視為不可用）"""
+    if not persisted:
+        return None
+    try:
+        ts = datetime.strptime(str(persisted.get("ts", "")), _FUND_TS_FMT)
+        return (datetime.now() - ts).total_seconds() / 3600
+    except Exception:
+        return None
+
+
 def _ensure_loaded(token):
     """記憶體沒有此 token 時，從 R2 載回（主機冷啟動/重新部署後復原永久資料）"""
     with _sync_lock:
@@ -767,8 +817,19 @@ def fetch_bwibbu():
             break
         except Exception as e:
             print(f"[BWIBBU] {d}: {e}")
-    set_cache("bwibbu", result)
-    return result
+    if result:
+        set_cache("bwibbu", result)
+        _r2_put_json(_FUND_BWIBBU_KEY,
+                     {"ts": datetime.now().strftime(_FUND_TS_FMT), "data": result})
+        return result
+    # 全部日期都抓失敗 → 不快取空結果（避免毒化 30 分鐘），改用 R2 舊資料撐著（14 天內）
+    persisted = _r2_get_json(_FUND_BWIBBU_KEY)
+    age_h = _fund_age_hours(persisted)
+    if persisted and persisted.get("data") and age_h is not None and age_h < 24 * 14:
+        print(f"[BWIBBU] live fetch failed, using R2 copy (age {age_h:.1f}h)")
+        set_cache("bwibbu", persisted["data"])
+        return persisted["data"]
+    return {}
 
 
 # ── FinMind 研發基本面 ─────────────────────────────────────────────────────────
@@ -890,7 +951,13 @@ def _start_bg_rd_fetch(codes):
         try:
             result = _compute_rd_data(codes)
             set_cache("rd_data", result)
-            print(f"[BG] RD data done: {len(result)} stocks")
+            valid = sum(1 for v in result.values() if v.get("debt_ratio") is not None)
+            if valid > 0:
+                _r2_put_json(_FUND_RD_KEY,
+                             {"ts": datetime.now().strftime(_FUND_TS_FMT), "data": result})
+                print(f"[BG] RD data done: {len(result)} stocks ({valid} valid) → R2 persisted")
+            else:
+                print(f"[BG] RD data done but 0 valid — 不寫 R2，保留舊持久資料")
         except Exception as e:
             print(f"[BG] RD error: {e}")
         finally:
@@ -902,10 +969,20 @@ def _start_bg_rd_fetch(codes):
 
 
 def get_rd_data(codes):
-    """回傳研發基本面快取（24h TTL），沒有就背景抓，先回空"""
+    """回傳研發基本面快取（記憶體 24h → R2 7 天 → 背景抓）。
+    核心原則:「沒資料」≠「不合格」——免費主機重啟失憶後，先用 R2 舊資料撐著
+    （基本面是季頻，幾天舊無妨），超過 24h 順手背景刷新，避免 rd 訊號整批假陰性。"""
     cached = get_cache("rd_data", ttl=86400)
     if cached is not None:
         return cached
+    persisted = _r2_get_json(_FUND_RD_KEY)
+    age_h = _fund_age_hours(persisted)
+    if persisted and persisted.get("data") and age_h is not None and age_h < 24 * 7:
+        set_cache("rd_data", persisted["data"])
+        print(f"[RD] restored from R2 (age {age_h:.1f}h, {len(persisted['data'])} stocks)")
+        if age_h >= 24:
+            _start_bg_rd_fetch(codes)
+        return persisted["data"]
     _start_bg_rd_fetch(codes)
     return {}
 
@@ -1113,10 +1190,13 @@ def debug_rd():
     except Exception as e:
         fm_test = {"ok": False, "error": str(e)}
 
+    rd_persisted = _r2_get_json(_FUND_RD_KEY)
     return jsonify({
         "rd_cache_exists":     rd_data is not None,
         "rd_cache_size":       len(rd_data) if rd_data else 0,
         "rd_bg_running":       _rd_bg_running,
+        "rd_r2_ts":            (rd_persisted or {}).get("ts"),
+        "rd_r2_size":          len((rd_persisted or {}).get("data", {})),
         "bwibbu_cache_exists": bwibbu is not None,
         "bwibbu_cache_size":   len(bwibbu) if bwibbu else 0,
         "fm_test":             fm_test,
@@ -1126,14 +1206,16 @@ def debug_rd():
 
 @app.route("/clear-rd-cache")
 def clear_rd_cache():
-    """清除 rd_data 快取，讓下次 /quote 重新觸發背景抓取"""
+    """清除 rd_data 快取（含 R2 持久層，否則舊資料會立刻還魂），讓下次 /quote 重新觸發背景抓取"""
     with _cache_lock:
         removed = "rd_data" in _cache
         _cache.pop("rd_data", None)
     with _rd_bg_lock:
         global _rd_bg_running
         _rd_bg_running = False
-    return jsonify({"ok": True, "cleared": removed, "msg": "請重新點『抓取行情』觸發背景更新"})
+    _r2_delete(_FUND_RD_KEY)
+    return jsonify({"ok": True, "cleared": removed, "r2_cleared": True,
+                    "msg": "請重新點『抓取行情』觸發背景更新"})
 
 
 @app.route("/admin/refresh-inst")
