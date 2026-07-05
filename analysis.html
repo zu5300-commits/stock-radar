@@ -228,6 +228,12 @@ async function loadSignals(token){
       if(t['30'])seg.push('+30% '+md(t['30'])); if(t['40'])seg.push('+40% '+md(t['40']));
       if(t['50'])seg.push('+50% '+md(t['50'])); if(t['150'])seg.push('+150% '+md(t['150']));
       return seg.length?'<br><span class="note">關卡達成：'+seg.join('　·　')+'</span>':''; };
+    // 加碼機會序（回放法人買超月檢查點；答「現在第幾階」）
+    const addTl=s=>{ if(!s.add.ladder) return ''; const ops=s.addOps||[], np=s.add.nextPct;
+      let line='<br><span class="note">'+(np!=null?'<b>下一階＝'+np+'%</b>':'<b>已加滿(3階)</b>');
+      line+= ops.length ? '　已出現：'+ops.map((o,i)=>'第'+(i+1)+'次 '+md(o.date)+' '+o.pct+'%').join('　·　')
+                        : '　(進場後尚無法人買超的月檢查點)';
+      return line+'</span>'; };
     // 已達全數出清(≥+150%) 移到獨立區，不擋住進行中的操作
     const cleared=j.signals.filter(s=>s.gainPct>=150);
     const active =j.signals.filter(s=>s.gainPct<150);
@@ -236,7 +242,7 @@ async function loadSignals(token){
       <td class="note">${md(s.entryDate)}</td>
       <td class="${cls(s.gainPct)}">${fmtPct(s.gainPct)}</td>
       <td class="${cls(s.inst20_lots)}">${s.inst20_lots==null?'—':(s.inst20_lots>=0?'+':'')+s.inst20_lots+'張'}</td>
-      <td class="${addCls(s.add.action)}">${s.add.action}${s.add.ladder?'　<b>'+s.add.ladder+'</b>':''}<br><span class="note">${s.add.note}</span></td>
+      <td class="${addCls(s.add.action)}">${s.add.action}${s.add.ladder?'　<b>'+s.add.ladder+'</b>':''}<br><span class="note">${s.add.note}</span>${addTl(s)}</td>
       <td class="${redCls(s.reduce.action)}">${s.reduce.action}<br><span class="note">${s.reduce.note}</span>${tl(s)}</td>
     </tr>`;
     const mainTable=active.length

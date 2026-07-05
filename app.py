@@ -2437,31 +2437,86 @@ def _strategy_signal_core(gain, inst20, price, ma60):
     return {"add": add, "reduce": reduce_, "gainPct": round(g, 1)}
 
 
-def _load_inst20_days():
-    """一次讀回最近 20 個有資料的交易日法人買賣（每檔含全市場），供逐股查詢避免重複讀 R2。"""
-    dates = recent_weekdays(28)
-    days = []
+_ADD_PROFIT_LADDER = [4, 2, 1]
+_ADD_LOSS_LADDER = [1, 2, 3]
+
+
+def _load_inst_history(n=70):
+    """一次讀回最近 n 個交易日法人買賣，回 [(YYYYMMDD, day_dict), …] 新→舊。
+    供 current inst20 與每月加碼機會回放共用，避免重複讀 R2。"""
+    dates = recent_weekdays(n)                      # 新→舊
+    out = []
     with ThreadPoolExecutor(max_workers=8) as ex:
-        for day in ex.map(_r2_get_day, dates):
+        for d, day in zip(dates, ex.map(_r2_get_day, dates)):
             if day:
-                days.append(day)
-            if len(days) >= 20:
-                break
-    return days
+                out.append((d, day))
+    return out
 
 
-def _inst20_from(days, code):
-    """在已載入的日資料中，加總某股近20日（外資+投信）淨買超（股）。無任一天資料回 None。"""
+def _inst_net_at(history, code, asof=None):
+    """某股近20個『有資料且日期<=asof』交易日的(外資+投信)淨買超合計。asof=None→最新20日。無資料回 None。"""
     total, n = 0, 0
-    for day in days:
+    for d, day in history:                          # 新→舊
+        if asof is not None and d > asof:
+            continue
         rec = day.get(code)
-        if not rec:
+        if rec is None:
             continue
         f = rec[0] if len(rec) > 0 and rec[0] is not None else 0
         t = rec[1] if len(rec) > 1 and rec[1] is not None else 0
         total += f + t
         n += 1
+        if n >= 20:
+            break
     return total if n > 0 else None
+
+
+def _monthly_add_ops(code, entry_date, p0, snaps, history):
+    """回放：自進場後每月首個交易日，若法人近20日淨買超>0 → 一次加碼機會。
+    依當時盈虧分獲利[4,2,1]/虧損[1,2,3]階梯（虧損期未計季線，屬約略）。
+    回 (ops, next_profit, next_loss)：ops=[{date,pct,regime}]，next_*=下一階成數或 None(已加滿)。"""
+    if not entry_date:
+        return [], (_ADD_PROFIT_LADDER[0] if _ADD_PROFIT_LADDER else None), (_ADD_LOSS_LADDER[0] if _ADD_LOSS_LADDER else None)
+    ed = str(entry_date).replace("-", "")
+    em = ed[:6]                                     # 進場當月
+    hist_dates = sorted(d for d, _ in history)      # 舊→新
+    checkpoints, seen = [], set()
+    for d in hist_dates:
+        ym = d[:6]
+        if ym <= em:                                # 跳過進場當月及更早（才剛進場不算加碼機會）
+            continue
+        if ym not in seen:                          # 每月第一個交易日
+            seen.add(ym)
+            checkpoints.append(d)
+
+    def gain_at(d):
+        fmt = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+        pv = None
+        for x in snaps:                             # 時序；取 date<=fmt 的最後有價
+            if (x.get("date") or "") <= fmt:
+                p = x.get("price")
+                if isinstance(p, (int, float)) and p > 0:
+                    pv = p
+        return (pv / p0 - 1.0) if pv else None
+
+    p_adds, l_adds, ops = 0, 0, []
+    for d in checkpoints:
+        net = _inst_net_at(history, code, d)
+        if net is None or net <= 0:                 # 法人沒買→不是加碼機會
+            continue
+        g = gain_at(d)
+        fmt = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+        if g is None or g >= 0:
+            if p_adds < len(_ADD_PROFIT_LADDER):
+                ops.append({"date": fmt, "pct": _ADD_PROFIT_LADDER[p_adds], "regime": "獲利"})
+                p_adds += 1
+        else:
+            if l_adds < len(_ADD_LOSS_LADDER):
+                ops.append({"date": fmt, "pct": _ADD_LOSS_LADDER[l_adds], "regime": "虧損"})
+                l_adds += 1
+    next_p = _ADD_PROFIT_LADDER[p_adds] if p_adds < len(_ADD_PROFIT_LADDER) else None
+    next_l = _ADD_LOSS_LADDER[l_adds] if l_adds < len(_ADD_LOSS_LADDER) else None
+    return ops, next_p, next_l
 
 
 def _ma60_from_fm(code):
@@ -2498,7 +2553,7 @@ def _compute_strategy_signals(token):
     with _sync_lock:
         entry = _sync_store.get(token) or {}
     wl = ((entry.get("data") or {}).get("wl") or {})
-    inst_days = _load_inst20_days()
+    history = _load_inst_history(70)
     out = []
     for code, w in wl.items():
         snaps = sorted(w.get("snapshots", []) or [], key=_an_iso)
@@ -2528,18 +2583,27 @@ def _compute_strategy_signals(token):
                 k = str(th)
                 if tier_dates[k] is None and gpct >= th:
                     tier_dates[k] = x.get("date")
-        i20 = _inst20_from(inst_days, code)
+        i20 = _inst_net_at(history, code)
         ma60, price_for_ma = None, cur
         if gain < 0:                                    # 只有虧損部位才需季線判斷，省 FinMind 呼叫
             m = _ma60_from_fm(code)
             if m:
                 ma60, price_for_ma = m["ma60"], m["price"]
         sig = _strategy_signal_core(gain, i20, price_for_ma, ma60)
+        add_ops, next_p, next_l = _monthly_add_ops(code, e.get("date"), p0, snaps, history)
+        # 依當前加碼動作決定「下一階成數」：獲利用獲利階梯、虧損用虧損階梯
+        act = sig["add"]["action"]
+        if act == "可獲利加碼":
+            sig["add"]["nextPct"] = next_p
+        elif act in ("可虧損加碼(小)", "虧損·待確認季線"):
+            sig["add"]["nextPct"] = next_l
+        else:
+            sig["add"]["nextPct"] = None
         out.append({
             "code": code, "name": w.get("name", code),
             "entry": round(p0, 2), "price": round(cur, 2),
             "entryDate": e.get("date"), "priceDate": cur_date,
-            "tierDates": tier_dates,
+            "tierDates": tier_dates, "addOps": add_ops,
             "inst20_lots": (round(i20 / 1000) if i20 is not None else None),
             **sig,
         })
