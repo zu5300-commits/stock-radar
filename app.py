@@ -2471,10 +2471,11 @@ def _inst_net_at(history, code, asof=None):
     return total if n > 0 else None
 
 
-def _monthly_add_ops(code, entry_date, p0, snaps, history):
+def _monthly_add_ops(code, entry_date, p0, snaps, history, get_closes=None):
     """回放：自進場後每月首個交易日，若法人近20日淨買超>0 → 一次加碼機會。
-    依當時盈虧分獲利[4,2,1]/虧損[1,2,3]階梯（虧損期未計季線，屬約略）。
-    回 (ops, next_profit, next_loss)：ops=[{date,pct,regime}]，next_*=下一階成數或 None(已加滿)。"""
+    依當時盈虧分獲利[4,2,1]/虧損[1,2,3]階梯；虧損檢查點套『當時歷史季線』——
+    站上才算加碼機會、跌破則不算(規則:不接刀)；季線資料不足時約略計入並標 approx。
+    回 (ops, next_profit, next_loss)：ops=[{date,pct,regime[,approx]}]，next_*=下一階成數或 None(已加滿)。"""
     if not entry_date:
         return [], (_ADD_PROFIT_LADDER[0] if _ADD_PROFIT_LADDER else None), (_ADD_LOSS_LADDER[0] if _ADD_LOSS_LADDER else None)
     ed = str(entry_date).replace("-", "")
@@ -2506,26 +2507,37 @@ def _monthly_add_ops(code, entry_date, p0, snaps, history):
             continue
         g = gain_at(d)
         fmt = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
-        if g is None or g >= 0:
+        if g is None or g >= 0:                     # 獲利檢查點
             if p_adds < len(_ADD_PROFIT_LADDER):
                 ops.append({"date": fmt, "pct": _ADD_PROFIT_LADDER[p_adds], "regime": "獲利"})
                 p_adds += 1
-        else:
+        else:                                       # 虧損檢查點 → 套當時歷史季線
+            approx = True
+            if get_closes is not None:
+                ma, pr = _ma60_price_at(get_closes(), fmt)
+                if ma is not None and pr is not None:
+                    if pr < ma:
+                        continue                    # 跌破季線→非加碼機會(不接刀)
+                    approx = False                  # 站上季線→真加碼機會
             if l_adds < len(_ADD_LOSS_LADDER):
-                ops.append({"date": fmt, "pct": _ADD_LOSS_LADDER[l_adds], "regime": "虧損"})
+                op = {"date": fmt, "pct": _ADD_LOSS_LADDER[l_adds], "regime": "虧損"}
+                if approx:
+                    op["approx"] = True
+                ops.append(op)
                 l_adds += 1
     next_p = _ADD_PROFIT_LADDER[p_adds] if p_adds < len(_ADD_PROFIT_LADDER) else None
     next_l = _ADD_LOSS_LADDER[l_adds] if l_adds < len(_ADD_LOSS_LADDER) else None
     return ops, next_p, next_l
 
 
-def _ma60_from_fm(code):
-    """用 FinMind 日收盤算季線(60日均)＋最新收盤。快取 12h。資料不足或無 token 回 None。"""
-    ck = f"ma60:{code}"
+def _fm_daily_closes(code):
+    """FinMind 日收盤序列 [(YYYY-MM-DD, close), …] 舊→新。快取 12h。無 token/資料回 []。
+    多抓 200 日，供『現在季線』與『歷史檢查點季線』共用。"""
+    ck = f"closes:{code}"
     c = get_cache(ck, ttl=43200)
     if c is not None:
-        return c if c else None
-    start = (datetime.now() - timedelta(days=130)).strftime("%Y-%m-%d")
+        return c
+    start = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d")
     rows = _fm_get("TaiwanStockPrice", code, start)
     closes = []
     for r in rows:
@@ -2538,13 +2550,20 @@ def _ma60_from_fm(code):
         if cl > 0 and dt:
             closes.append((dt, cl))
     closes.sort()
-    if len(closes) < 60:
-        set_cache(ck, {})
-        return None
-    last60 = [c2 for _, c2 in closes[-60:]]
-    res = {"ma60": sum(last60) / 60.0, "price": closes[-1][1], "date": closes[-1][0]}
-    set_cache(ck, res)
-    return res
+    set_cache(ck, closes)
+    return closes
+
+
+def _ma60_price_at(closes, asof=None):
+    """從日收盤序列取『截至 asof(含)』季線(60日均)與當日收盤。asof=None→最新；YYYY-MM-DD。
+    回 (ma60, price)；不足 60 日回 (None, None)。"""
+    if not closes:
+        return None, None
+    seq = closes if asof is None else [x for x in closes if x[0] <= asof]
+    if len(seq) < 60:
+        return None, None
+    last60 = [c for _, c in seq[-60:]]
+    return sum(last60) / 60.0, seq[-1][1]
 
 
 def _compute_strategy_signals(token):
@@ -2584,13 +2603,20 @@ def _compute_strategy_signals(token):
                 if tier_dates[k] is None and gpct >= th:
                     tier_dates[k] = x.get("date")
         i20 = _inst_net_at(history, code)
+        # 日收盤（季線用）——記憶化，僅在需要（現虧損 or 歷史虧損檢查點）時抓一次 FinMind
+        _cl = {"seq": None, "got": False}
+        def _get_closes(_code=code):
+            if not _cl["got"]:
+                _cl["seq"] = _fm_daily_closes(_code)
+                _cl["got"] = True
+            return _cl["seq"]
         ma60, price_for_ma = None, cur
-        if gain < 0:                                    # 只有虧損部位才需季線判斷，省 FinMind 呼叫
-            m = _ma60_from_fm(code)
-            if m:
-                ma60, price_for_ma = m["ma60"], m["price"]
+        if gain < 0:                                    # 現虧損才需即時季線
+            ma60, price_for_ma = _ma60_price_at(_get_closes())
+            if price_for_ma is None:                    # 季線資料不足→退回快照價（core 會走「待確認季線」）
+                price_for_ma = cur
         sig = _strategy_signal_core(gain, i20, price_for_ma, ma60)
-        add_ops, next_p, next_l = _monthly_add_ops(code, e.get("date"), p0, snaps, history)
+        add_ops, next_p, next_l = _monthly_add_ops(code, e.get("date"), p0, snaps, history, _get_closes)
         # 依當前加碼動作決定「下一階成數」：獲利用獲利階梯、虧損用虧損階梯
         act = sig["add"]["action"]
         if act == "可獲利加碼":

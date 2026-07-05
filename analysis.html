@@ -217,7 +217,7 @@ async function loadSignals(token){
   const box=document.getElementById('sigCard');
   if(!box||!token) return;
   try{
-    const r=await fetch('/strategy-signals?token='+encodeURIComponent(token),{signal:AbortSignal.timeout(40000)});
+    const r=await fetch('/strategy-signals?token='+encodeURIComponent(token),{signal:AbortSignal.timeout(60000)});
     const j=await r.json();
     if(!j.ok){ box.innerHTML='<h2>📍 加碼/減碼訊號</h2><div class="note">載入失敗：'+(j.error||'未知')+'</div>'; return; }
     if(!j.signals||!j.signals.length){ box.innerHTML='<h2>📍 加碼/減碼訊號</h2><div class="note">目前無可產生訊號的追蹤股（需有進場價與快照）。</div>'; return; }
@@ -231,7 +231,7 @@ async function loadSignals(token){
     // 加碼機會序（回放法人買超月檢查點；答「現在第幾階」）
     const addTl=s=>{ if(!s.add.ladder) return ''; const ops=s.addOps||[], np=s.add.nextPct;
       let line='<br><span class="note">'+(np!=null?'<b>下一階＝'+np+'%</b>':'<b>已加滿(3階)</b>');
-      line+= ops.length ? '　已出現：'+ops.map((o,i)=>'第'+(i+1)+'次 '+md(o.date)+' '+o.pct+'%').join('　·　')
+      line+= ops.length ? '　已出現：'+ops.map((o,i)=>'第'+(i+1)+'次 '+md(o.date)+' '+o.pct+'%'+(o.regime==='虧損'?'(虧損階'+(o.approx?'約':'')+')':'(獲利階)')).join('　·　')
                         : '　(進場後尚無法人買超的月檢查點)';
       return line+'</span>'; };
     // 已達全數出清(≥+150%) 移到獨立區，不擋住進行中的操作
@@ -264,7 +264,7 @@ async function loadSignals(token){
       : '';
     box.innerHTML=`<h2>📍 加碼/減碼訊號（依你的規則，只給成數，金額自行換算）</h2>
       ${mainTable}${clearedTable}
-      <div class="note" style="margin-top:8px">報酬＝進場價→最新快照價；法人20日＝外資+投信近20交易日淨買超(張)；季線=60日均線。加碼成數依序＝第1/2/3次加碼比例；<b>減碼關卡達成日＝快照首次跨過該報酬的日期（判斷先後用，依快照約略）</b>。此為規則自動判定、非投資建議；某階段是否已執行過請自行對照實際部位。</div>`;
+      <div class="note" style="margin-top:8px">報酬＝進場價→最新快照價；法人20日＝外資+投信近20交易日淨買超(張)；季線=60日均線。<b>加碼機會序＝回放法人買超的月檢查點（假設你每次都跟，實際加幾次自行對照）；獲利階4%→2%→1%、虧損階1%→2%→3%，虧損階已套「當時歷史季線」（跌破不算機會；標「約」＝當時季線資料不足）</b>。減碼關卡達成日＝快照首次跨過該報酬（依快照約略）。此為規則自動判定、非投資建議。</div>`;
   }catch(e){ box.innerHTML='<h2>📍 加碼/減碼訊號</h2><div class="note">載入失敗：'+e.message+'</div>'; }
 }
 
