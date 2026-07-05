@@ -2401,6 +2401,139 @@ def _analyze_one(code, w):
     }
 
 
+# ── 加碼/減碼訊號引擎（依龍哥策略規則；只給成數，金額由龍哥自行換算）─────────────
+def _strategy_signal_core(gain, inst20, price, ma60):
+    """純判定：回 {add, reduce, gainPct}。
+    gain: 相對進場價漲跌（小數，0.35=+35%）
+    inst20: 近20交易日三大法人（外資+投信）淨買超（股，可 None=無資料）
+    price/ma60: 現價與季線(60日均線)，判斷『虧損時有無站上季線』；ma60 可 None=資料不足
+    加碼：法人近20日淨買超>0 才有資格 → 獲利中 4%→2%→1%；虧損但站上季線 1%→2%→3%；虧損破季線暫停
+    減碼：+30%回收本金一半 / +40%回收3成 / +50%回收2成 / +150%全數出清（顯示現值落在哪一關）"""
+    if inst20 is None:
+        add = {"action": "資料不足", "ladder": None, "note": "近20日法人資料不足"}
+    elif inst20 > 0:
+        if gain >= 0:
+            add = {"action": "可獲利加碼", "ladder": "4%→2%→1%", "note": "法人近20日買超＋目前獲利（順勢加碼）"}
+        elif ma60 is not None and price >= ma60:
+            add = {"action": "可虧損加碼(小)", "ladder": "1%→2%→3%", "note": "法人買超＋雖虧損但已站上季線"}
+        elif ma60 is not None and price < ma60:
+            add = {"action": "暫停加碼", "ladder": None, "note": "虧損且跌破季線（規則：不接刀）"}
+        else:
+            add = {"action": "虧損·待確認季線", "ladder": "1%→2%→3%", "note": "法人買超＋虧損；季線資料不足，站上才可小量加"}
+    else:
+        add = {"action": "不加碼", "ladder": None, "note": "法人近20日未淨買超（沒在買就不加）"}
+
+    g = gain * 100.0
+    if g >= 150:
+        reduce_ = {"action": "全數出清", "tier": 150, "note": "純利倉已≥+150%，全部賣出"}
+    elif g >= 50:
+        reduce_ = {"action": "減碼·回收本金2成", "tier": 50, "note": "+50%關卡；本金應累計回收10成，之後純利倉抱到+150%"}
+    elif g >= 40:
+        reduce_ = {"action": "減碼·回收本金3成", "tier": 40, "note": "+40%關卡（此前+30%的一半應已回收）"}
+    elif g >= 30:
+        reduce_ = {"action": "減碼·回收本金一半", "tier": 30, "note": "+30%關卡（第一段獲利了結）"}
+    else:
+        reduce_ = {"action": "續抱", "tier": None, "note": "未達+30%關卡，不減碼"}
+    return {"add": add, "reduce": reduce_, "gainPct": round(g, 1)}
+
+
+def _load_inst20_days():
+    """一次讀回最近 20 個有資料的交易日法人買賣（每檔含全市場），供逐股查詢避免重複讀 R2。"""
+    dates = recent_weekdays(28)
+    days = []
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for day in ex.map(_r2_get_day, dates):
+            if day:
+                days.append(day)
+            if len(days) >= 20:
+                break
+    return days
+
+
+def _inst20_from(days, code):
+    """在已載入的日資料中，加總某股近20日（外資+投信）淨買超（股）。無任一天資料回 None。"""
+    total, n = 0, 0
+    for day in days:
+        rec = day.get(code)
+        if not rec:
+            continue
+        f = rec[0] if len(rec) > 0 and rec[0] is not None else 0
+        t = rec[1] if len(rec) > 1 and rec[1] is not None else 0
+        total += f + t
+        n += 1
+    return total if n > 0 else None
+
+
+def _ma60_from_fm(code):
+    """用 FinMind 日收盤算季線(60日均)＋最新收盤。快取 12h。資料不足或無 token 回 None。"""
+    ck = f"ma60:{code}"
+    c = get_cache(ck, ttl=43200)
+    if c is not None:
+        return c if c else None
+    start = (datetime.now() - timedelta(days=130)).strftime("%Y-%m-%d")
+    rows = _fm_get("TaiwanStockPrice", code, start)
+    closes = []
+    for r in rows:
+        cl = r.get("close")
+        dt = r.get("date")
+        try:
+            cl = float(cl)
+        except (TypeError, ValueError):
+            continue
+        if cl > 0 and dt:
+            closes.append((dt, cl))
+    closes.sort()
+    if len(closes) < 60:
+        set_cache(ck, {})
+        return None
+    last60 = [c2 for _, c2 in closes[-60:]]
+    res = {"ma60": sum(last60) / 60.0, "price": closes[-1][1], "date": closes[-1][0]}
+    set_cache(ck, res)
+    return res
+
+
+def _compute_strategy_signals(token):
+    """對追蹤清單每檔算加碼/減碼訊號。進場價=首筆 entry 快照；現價=最後有價快照。"""
+    _ensure_loaded(token)
+    with _sync_lock:
+        entry = _sync_store.get(token) or {}
+    wl = ((entry.get("data") or {}).get("wl") or {})
+    inst_days = _load_inst20_days()
+    out = []
+    for code, w in wl.items():
+        snaps = sorted(w.get("snapshots", []) or [], key=_an_iso)
+        if not snaps:
+            continue
+        e = next((x for x in snaps if x.get("type") == "entry"), snaps[0])
+        p0 = e.get("price")
+        if not p0 or p0 <= 0:
+            continue
+        cur = None
+        for x in reversed(snaps):
+            pv = x.get("price")
+            if isinstance(pv, (int, float)) and pv > 0:
+                cur = pv
+                break
+        if not cur:
+            continue
+        gain = cur / p0 - 1.0
+        i20 = _inst20_from(inst_days, code)
+        ma60, price_for_ma = None, cur
+        if gain < 0:                                    # 只有虧損部位才需季線判斷，省 FinMind 呼叫
+            m = _ma60_from_fm(code)
+            if m:
+                ma60, price_for_ma = m["ma60"], m["price"]
+        sig = _strategy_signal_core(gain, i20, price_for_ma, ma60)
+        out.append({
+            "code": code, "name": w.get("name", code),
+            "entry": round(p0, 2), "price": round(cur, 2),
+            "inst20_lots": (round(i20 / 1000) if i20 is not None else None),
+            **sig,
+        })
+    out.sort(key=lambda r: r["gainPct"], reverse=True)
+    return out
+
+
 def _compute_analysis(token):
     _ensure_loaded(token)
     with _sync_lock:
@@ -2428,6 +2561,24 @@ def analysis_data():
         return jsonify({"ok": False, "error": "auth"}), 401
     try:
         return jsonify({"ok": True, **_compute_analysis(ANALYSIS_TOKEN)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": (str(e) or repr(e) or type(e).__name__)})
+
+
+@app.route("/strategy-signals")
+def strategy_signals():
+    """加碼/減碼訊號（依龍哥策略規則）。需帶 analysis token（同 /sync/load 那組同步碼）。
+    快取 1h；只給成數不算金額。"""
+    token = str(request.args.get("token", "")).strip()[:64]
+    if not token or not _hmac.compare_digest(token, ANALYSIS_TOKEN):
+        return jsonify({"ok": False, "error": "bad token"}), 403
+    cached = get_cache("strategy_signals", ttl=3600)
+    if cached is not None:
+        return jsonify({"ok": True, "cached": True, "signals": cached})
+    try:
+        sigs = _compute_strategy_signals(ANALYSIS_TOKEN)
+        set_cache("strategy_signals", sigs)
+        return jsonify({"ok": True, "signals": sigs})
     except Exception as e:
         return jsonify({"ok": False, "error": (str(e) or repr(e) or type(e).__name__)})
 

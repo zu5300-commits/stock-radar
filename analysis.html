@@ -28,7 +28,8 @@
   th:first-child,td:first-child{ text-align:left; position:sticky; left:0; background:var(--card); }
   th{ color:var(--mut); font-weight:600; }
   .scroll{ overflow-x:auto; -webkit-overflow-scrolling:touch; }
-  .pos{ color:var(--good); } .neg{ color:var(--bad); } .zero{ color:var(--mut); }
+  .pos{ color:var(--good); } .neg{ color:var(--bad); } .zero{ color:var(--mut); } .amber{ color:var(--warn); }
+  .sig th,.sig td{ vertical-align:top; }
   .pill{ display:inline-block; font-size:11px; padding:1px 7px; border-radius:99px;
          background:#1f2d3d; color:var(--mut); }
   .note{ color:var(--mut); font-size:12px; line-height:1.6; }
@@ -139,6 +140,8 @@ function render(j){
       <span>大盤參考線 0050：<b class="${cls(base)}">${fmtPct(base)}</b>（超額報酬 = 個股 − 此線，近似）</span>
     </div>
 
+    <div id="sigCard" class="card sig"><h2>📍 加碼/減碼訊號</h2><div class="note">訊號計算中…（首次載入約需數秒）</div></div>
+
     <div class="card findings">
       <h2>重點規律（探索性，非投資建議）</h2>
       <ul>
@@ -206,6 +209,32 @@ function render(j){
     let demo=rows[0],mx=-1;   // 預設顯示「風口停歇/升星」事件最多那檔，事件標記一目了然
     rows.forEach(r=>{const ev=(r.series||[]).filter(p=>p.type==='wind-lost'||p.type==='wind-retrigger').length; if(ev>mx){mx=ev;demo=r;}});
     pick.value=demo.code; drawChart(demo.code); }
+  loadSignals(j.token);
+}
+
+// ── 加碼/減碼訊號（依龍哥策略規則，只給成數，金額自行換算）──
+async function loadSignals(token){
+  const box=document.getElementById('sigCard');
+  if(!box||!token) return;
+  try{
+    const r=await fetch('/strategy-signals?token='+encodeURIComponent(token),{signal:AbortSignal.timeout(40000)});
+    const j=await r.json();
+    if(!j.ok){ box.innerHTML='<h2>📍 加碼/減碼訊號</h2><div class="note">載入失敗：'+(j.error||'未知')+'</div>'; return; }
+    if(!j.signals||!j.signals.length){ box.innerHTML='<h2>📍 加碼/減碼訊號</h2><div class="note">目前無可產生訊號的追蹤股（需有進場價與快照）。</div>'; return; }
+    const addCls=a=>a.indexOf('可')===0?'pos':(a.indexOf('暫停')>=0||a.indexOf('不加')>=0)?'neg':'zero';
+    const redCls=a=>a.indexOf('出清')>=0?'neg':a.indexOf('回收')>=0?'amber':'zero';
+    const rows=j.signals.map(s=>`<tr>
+      <td>${s.name}<br><span class="pill">${s.code}</span></td>
+      <td class="${cls(s.gainPct)}">${fmtPct(s.gainPct)}</td>
+      <td class="${cls(s.inst20_lots)}">${s.inst20_lots==null?'—':(s.inst20_lots>=0?'+':'')+s.inst20_lots+'張'}</td>
+      <td class="${addCls(s.add.action)}">${s.add.action}${s.add.ladder?'　<b>'+s.add.ladder+'</b>':''}<br><span class="note">${s.add.note}</span></td>
+      <td class="${redCls(s.reduce.action)}">${s.reduce.action}<br><span class="note">${s.reduce.note}</span></td>
+    </tr>`).join('');
+    box.innerHTML=`<h2>📍 加碼/減碼訊號（依你的規則，只給成數，金額自行換算）</h2>
+      <div class="scroll"><table>
+        <tr><th>標的</th><th>目前報酬</th><th>法人20日</th><th>加碼訊號</th><th>減碼訊號</th></tr>${rows}</table></div>
+      <div class="note" style="margin-top:8px">報酬＝進場價→最新快照價；法人20日＝外資+投信近20交易日淨買超(張)；季線=60日均線。加碼成數依序＝第1/2/3次加碼比例。<b>此為規則自動判定、非投資建議；某階段是否已執行過請自行對照實際部位。</b></div>`;
+  }catch(e){ box.innerHTML='<h2>📍 加碼/減碼訊號</h2><div class="note">載入失敗：'+e.message+'</div>'; }
 }
 
 function drawChart(code){
