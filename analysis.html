@@ -223,17 +223,42 @@ async function loadSignals(token){
     if(!j.signals||!j.signals.length){ box.innerHTML='<h2>📍 加碼/減碼訊號</h2><div class="note">目前無可產生訊號的追蹤股（需有進場價與快照）。</div>'; return; }
     const addCls=a=>a.indexOf('可')===0?'pos':(a.indexOf('暫停')>=0||a.indexOf('不加')>=0)?'neg':'zero';
     const redCls=a=>a.indexOf('出清')>=0?'neg':a.indexOf('回收')>=0?'amber':'zero';
-    const rows=j.signals.map(s=>`<tr>
+    const md=d=>d?String(d).slice(5).replace('-','/'):'—';   // 2026-05-20 → 05/20
+    const tl=s=>{ const t=s.tierDates||{}, seg=[];
+      if(t['30'])seg.push('+30% '+md(t['30'])); if(t['40'])seg.push('+40% '+md(t['40']));
+      if(t['50'])seg.push('+50% '+md(t['50'])); if(t['150'])seg.push('+150% '+md(t['150']));
+      return seg.length?'<br><span class="note">關卡達成：'+seg.join('　·　')+'</span>':''; };
+    // 已達全數出清(≥+150%) 移到獨立區，不擋住進行中的操作
+    const cleared=j.signals.filter(s=>s.gainPct>=150);
+    const active =j.signals.filter(s=>s.gainPct<150);
+    const rowA=s=>`<tr>
       <td>${s.name}<br><span class="pill">${s.code}</span></td>
+      <td class="note">${md(s.entryDate)}</td>
       <td class="${cls(s.gainPct)}">${fmtPct(s.gainPct)}</td>
       <td class="${cls(s.inst20_lots)}">${s.inst20_lots==null?'—':(s.inst20_lots>=0?'+':'')+s.inst20_lots+'張'}</td>
       <td class="${addCls(s.add.action)}">${s.add.action}${s.add.ladder?'　<b>'+s.add.ladder+'</b>':''}<br><span class="note">${s.add.note}</span></td>
-      <td class="${redCls(s.reduce.action)}">${s.reduce.action}<br><span class="note">${s.reduce.note}</span></td>
-    </tr>`).join('');
+      <td class="${redCls(s.reduce.action)}">${s.reduce.action}<br><span class="note">${s.reduce.note}</span>${tl(s)}</td>
+    </tr>`;
+    const mainTable=active.length
+      ? `<div class="scroll"><table>
+          <tr><th>標的</th><th>進場日</th><th>目前報酬</th><th>法人20日</th><th>加碼訊號</th><th>減碼訊號</th></tr>
+          ${active.map(rowA).join('')}</table></div>`
+      : '<div class="note">目前沒有進行中的標的。</div>';
+    const clearedTable=cleared.length
+      ? `<h2 style="margin-top:20px;color:var(--bad)">✅ 已達全數出清（純利倉≥+150%，規則：全部賣出）</h2>
+         <div class="scroll"><table>
+           <tr><th>標的</th><th>進場日</th><th>報酬</th><th>+150%達成日</th><th>各關卡達成序</th></tr>
+           ${cleared.map(s=>{ const t=s.tierDates||{}; return `<tr>
+             <td>${s.name}<br><span class="pill">${s.code}</span></td>
+             <td class="note">${md(s.entryDate)}</td>
+             <td class="${cls(s.gainPct)}">${fmtPct(s.gainPct)}</td>
+             <td class="neg">${md(t['150'])}</td>
+             <td class="note">+30% ${md(t['30'])}　·　+40% ${md(t['40'])}　·　+50% ${md(t['50'])}</td>
+           </tr>`; }).join('')}</table></div>`
+      : '';
     box.innerHTML=`<h2>📍 加碼/減碼訊號（依你的規則，只給成數，金額自行換算）</h2>
-      <div class="scroll"><table>
-        <tr><th>標的</th><th>目前報酬</th><th>法人20日</th><th>加碼訊號</th><th>減碼訊號</th></tr>${rows}</table></div>
-      <div class="note" style="margin-top:8px">報酬＝進場價→最新快照價；法人20日＝外資+投信近20交易日淨買超(張)；季線=60日均線。加碼成數依序＝第1/2/3次加碼比例。<b>此為規則自動判定、非投資建議；某階段是否已執行過請自行對照實際部位。</b></div>`;
+      ${mainTable}${clearedTable}
+      <div class="note" style="margin-top:8px">報酬＝進場價→最新快照價；法人20日＝外資+投信近20交易日淨買超(張)；季線=60日均線。加碼成數依序＝第1/2/3次加碼比例；<b>減碼關卡達成日＝快照首次跨過該報酬的日期（判斷先後用，依快照約略）</b>。此為規則自動判定、非投資建議；某階段是否已執行過請自行對照實際部位。</div>`;
   }catch(e){ box.innerHTML='<h2>📍 加碼/減碼訊號</h2><div class="note">載入失敗：'+e.message+'</div>'; }
 }
 

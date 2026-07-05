@@ -2508,15 +2508,26 @@ def _compute_strategy_signals(token):
         p0 = e.get("price")
         if not p0 or p0 <= 0:
             continue
-        cur = None
+        cur, cur_date = None, None
         for x in reversed(snaps):
             pv = x.get("price")
             if isinstance(pv, (int, float)) and pv > 0:
-                cur = pv
+                cur, cur_date = pv, x.get("date")
                 break
         if not cur:
             continue
         gain = cur / p0 - 1.0
+        # 各減碼關卡「首次達成日」——沿快照時序找第一次 gain 跨過門檻，供判斷先後
+        tier_dates = {"30": None, "40": None, "50": None, "150": None}
+        for x in snaps:
+            pv = x.get("price")
+            if not isinstance(pv, (int, float)) or pv <= 0:
+                continue
+            gpct = (pv / p0 - 1.0) * 100.0
+            for th in (30, 40, 50, 150):
+                k = str(th)
+                if tier_dates[k] is None and gpct >= th:
+                    tier_dates[k] = x.get("date")
         i20 = _inst20_from(inst_days, code)
         ma60, price_for_ma = None, cur
         if gain < 0:                                    # 只有虧損部位才需季線判斷，省 FinMind 呼叫
@@ -2527,6 +2538,8 @@ def _compute_strategy_signals(token):
         out.append({
             "code": code, "name": w.get("name", code),
             "entry": round(p0, 2), "price": round(cur, 2),
+            "entryDate": e.get("date"), "priceDate": cur_date,
+            "tierDates": tier_dates,
             "inst20_lots": (round(i20 / 1000) if i20 is not None else None),
             **sig,
         })
