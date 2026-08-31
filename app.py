@@ -2075,8 +2075,18 @@ def cron_snapshot():
     # （latest_date 是 YYYY/MM/DD，today 是 YYYY-MM-DD，比對前正規化分隔符。）
     ld = str(latest_date or "").replace("/", "-")
     if ld != today:
-        _write_health("no_data", now, date=today, msg=f"最新行情日={latest_date or '無'}，非今天")
-        return jsonify({"ok": True, "skipped": f"no data for today（最新={latest_date}，颱風假/臨時休市）"})
+        # 最新行情日不是今天，要分兩種情況，不能一律當異常：
+        #   (a) 還沒到今天盤後資料公布時間（清晨/早上被外部排程戳到 snapshot）：今天的資料本來
+        #       就還沒出，屬正常。此時「不要」用 no_data 蓋掉最後一次成功交易日的健康紀錄
+        #       （見 _write_health 不變式：永遠保留最後一次交易日的結果），否則早上戳一下就把好
+        #       紀錄洗成 no_data，害 /cron/health 誤報「未更新」。
+        #   (b) 已過公布時間今天仍沒資料：才可能是颱風假/臨時休市/資料源異常，記 no_data 待告警。
+        # 界線沿用 _last_trading_day 的 19:00（過了才視為「今天應已完成」），兩處判斷才一致：
+        # 一旦寫下 no_data(date=today)，expect 必已等於 today，/cron/health 的告警分支才會正確觸發。
+        if now.hour >= 19:
+            _write_health("no_data", now, date=today, msg=f"最新行情日={latest_date or '無'}，非今天")
+        return jsonify({"ok": True,
+                        "skipped": f"no data for today（最新={latest_date}，颱風假/臨時休市或盤後資料未公布）"})
 
     with _sync_lock:
         entry = _sync_store.get(token, {"data": {"wl": {}, "lastFetch": None}, "ts": 0})
